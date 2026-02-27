@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+
+# PyInstaller build artifacts
+build_tmp/
+*.spec
+
+# Carpetas de salida generadas
+Salida/
+setup/
+
+# Claude internal
+.claude/
+
+# Windows
+Thumbs.db
+Desktop.ini
