@@ -210,6 +210,58 @@ def get_unique_column_values(
     return sorted(seen)
 
 
+def collect_rows_by_group(
+    filepath:        str,
+    encoding:        str,
+    delimiter:       str,
+    group_column:    str,
+    columns_to_read: list[str],
+    rename_map:      Optional[dict[str, str]] = None,
+) -> dict[str, list[dict]]:
+    """
+    Lee el CSV en chunks y devuelve {group_value: [rows_as_dicts]}.
+
+    Cada fila es un dict {key: value} donde key es el nombre final
+    (con rename_map aplicado si corresponde).
+    columns_to_read puede o no incluir group_column; la función lo garantiza.
+    """
+    def _key(col: str) -> str:
+        if rename_map and col in rename_map:
+            return rename_map[col]
+        return col
+
+    groups: dict[str, list[dict]] = {}
+    chunk_iter = None
+    try:
+        chunk_iter = pd.read_csv(
+            filepath,
+            sep=delimiter,
+            encoding=encoding,
+            chunksize=25_000,
+            dtype=str,
+            on_bad_lines="skip",
+            engine="python",
+        )
+        for chunk in chunk_iter:
+            chunk = chunk.fillna("")
+            if group_column not in chunk.columns:
+                continue
+            # Solo las columnas solicitadas que existen en este chunk
+            available = [c for c in columns_to_read if c in chunk.columns]
+            key_map   = {c: _key(c) for c in available}
+            for seg_val, group_df in chunk.groupby(group_column, sort=False):
+                seg_val = str(seg_val).strip()
+                if not seg_val:
+                    continue
+                sub     = group_df[available].rename(columns=key_map)
+                records = sub.to_dict(orient="records")
+                groups.setdefault(seg_val, []).extend(records)
+    finally:
+        if chunk_iter is not None:
+            chunk_iter.close()
+    return groups
+
+
 def get_unique_values_by_group(
     filepath:     str,
     encoding:     str,

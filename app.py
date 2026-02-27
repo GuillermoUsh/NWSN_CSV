@@ -2,6 +2,7 @@
 app.py — Interfaz gráfica con CustomTkinter para el CSV Processor.
 """
 
+import json
 import os
 import queue
 import threading
@@ -19,6 +20,7 @@ from processor import (
     get_preview,
     get_unique_column_values,
     get_unique_values_by_group,
+    collect_rows_by_group,
     sanitize_filename,
     process_csv,
 )
@@ -246,6 +248,7 @@ class CSVProcessorApp(ctk.CTk):
 
         self.tabview.add("   Vista Previa   ")
         self.tabview.add("   Exportar TXT   ")
+        self.tabview.add("   Exportar JSON   ")
         # self.tabview.add("Filtros")       # TODO: descomentar para reactivar
         # self.tabview.add("Transformar")   # TODO: descomentar para reactivar
 
@@ -260,6 +263,7 @@ class CSVProcessorApp(ctk.CTk):
 
         self._build_preview_tab(self.tabview.tab("   Vista Previa   "))
         self._build_export_txt_tab(self.tabview.tab("   Exportar TXT   "))
+        self._build_export_json_tab(self.tabview.tab("   Exportar JSON   "))
         # self._build_filter_tab(self.tabview.tab("Filtros"))
         # self._build_transform_tab(self.tabview.tab("Transformar"))
 
@@ -514,6 +518,7 @@ class CSVProcessorApp(ctk.CTk):
         self._refresh_column_checkboxes()
         self._refresh_preview_table()
         self._refresh_txt_col_menu()
+        self._refresh_json_col_menu()
         # self._refresh_filter_col_menu()      # TODO: descomentar al reactivar Filtros
         # self._refresh_transform_col_menu()   # TODO: descomentar al reactivar Transformar
         # self._refresh_transform_list()       # TODO: descomentar al reactivar Transformar
@@ -1288,6 +1293,236 @@ class CSVProcessorApp(ctk.CTk):
             color = "red"
 
         self.after(0, lambda m=msg, c=color: self.txt_status_label.configure(text=m, text_color=c))
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Exportar JSON — tab y lógica
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def _build_export_json_tab(self, parent):
+        """Tab para exportar el CSV segmentado como archivos JSON."""
+        parent.grid_columnconfigure(0, weight=1)
+
+        # ── Panel de configuración ────────────────────────────────────────────
+        cfg = ctk.CTkFrame(parent)
+        cfg.grid(row=0, column=0, sticky="ew", padx=6, pady=(6, 4))
+        cfg.grid_columnconfigure(1, weight=1)
+
+        # Selector de columna para segmentar
+        ctk.CTkLabel(cfg, text="Segmentar por:", width=130, anchor="e").grid(
+            row=0, column=0, padx=(10, 4), pady=8
+        )
+        self.json_seg_col_var  = tk.StringVar(value="(sin columnas)")
+        self.json_seg_col_menu = ctk.CTkOptionMenu(
+            cfg,
+            variable=self.json_seg_col_var,
+            values=["(sin columnas)"],
+            command=lambda _: self._update_json_dest_label(),
+        )
+        self.json_seg_col_menu.grid(row=0, column=1, sticky="ew", padx=(0, 10), pady=8)
+
+        # Separador
+        ctk.CTkFrame(cfg, height=2, fg_color="gray40").grid(
+            row=1, column=0, columnspan=2, sticky="ew", padx=10, pady=(0, 8)
+        )
+
+        # Qué columnas incluir en el JSON
+        ctk.CTkLabel(cfg, text="Columnas JSON:", width=130, anchor="e").grid(
+            row=2, column=0, padx=(10, 4), pady=(0, 8)
+        )
+        self.json_cols_var = tk.StringVar(value="selected")
+        cols_frame = ctk.CTkFrame(cfg, fg_color="transparent")
+        cols_frame.grid(row=2, column=1, sticky="w", padx=(0, 10), pady=(0, 8))
+        ctk.CTkRadioButton(
+            cols_frame,
+            text="Columnas seleccionadas del panel izquierdo",
+            variable=self.json_cols_var, value="selected",
+        ).pack(anchor="w", pady=(0, 4))
+        ctk.CTkRadioButton(
+            cols_frame,
+            text="Todas las columnas del CSV",
+            variable=self.json_cols_var, value="all",
+        ).pack(anchor="w")
+
+        # Nota de formato
+        ctk.CTkLabel(
+            cfg,
+            text='Formato de salida: [ {"col1": "val", "col2": "val", …}, … ]',
+            font=("Consolas", 11),
+            text_color="gray",
+            anchor="w",
+        ).grid(row=3, column=0, columnspan=2, sticky="w", padx=14, pady=(0, 10))
+
+        # ── Ruta de destino — recuadro prominente ─────────────────────────────
+        dest_frame = ctk.CTkFrame(parent, fg_color=("#dbe8f5", "#1a3a5c"), corner_radius=8)
+        dest_frame.grid(row=1, column=0, sticky="ew", padx=8, pady=(6, 4))
+        dest_frame.grid_columnconfigure(0, weight=1)
+        dest_frame.grid_columnconfigure(1, weight=0)
+
+        ctk.CTkLabel(
+            dest_frame, text="📁  Destino:",
+            font=("Segoe UI", 13, "bold"), anchor="w",
+        ).grid(row=0, column=0, sticky="w", padx=12, pady=(8, 0))
+
+        self.json_dest_label = ctk.CTkLabel(
+            dest_frame,
+            text="<carpeta del CSV> / JSON / <valor_segmento>.json",
+            font=("Segoe UI", 13), anchor="w",
+            wraplength=520, justify="left",
+        )
+        self.json_dest_label.grid(row=1, column=0, sticky="w", padx=12, pady=(2, 10))
+
+        ctk.CTkButton(
+            dest_frame,
+            text="📂  Abrir carpeta",
+            command=self._open_json_dest_folder,
+            width=150, height=32,
+            font=("Segoe UI", 11, "bold"),
+            fg_color=("gray75", "gray30"),
+            hover_color=("gray65", "gray40"),
+            text_color=("gray10", "gray90"),
+        ).grid(row=1, column=1, padx=(4, 12), pady=(2, 10), sticky="e")
+
+        # ── Botón exportar + barra de progreso + estado ───────────────────────
+        ctk.CTkButton(
+            parent,
+            text="🗂  Exportar JSON",
+            command=self.export_json_start,
+            height=38,
+            font=("Segoe UI", 12, "bold"),
+            fg_color="#2d7d46", hover_color="#1f5c32",
+        ).grid(row=2, column=0, padx=12, pady=(6, 4), sticky="w")
+
+        self.json_progress_bar = ctk.CTkProgressBar(parent, height=10)
+        self.json_progress_bar.grid(row=3, column=0, sticky="ew", padx=12, pady=(0, 2))
+        self.json_progress_bar.set(0)
+
+        self.json_status_label = ctk.CTkLabel(
+            parent, text="", text_color="gray",
+            font=("Segoe UI", 13, "bold"), anchor="w", wraplength=580,
+        )
+        self.json_status_label.grid(row=4, column=0, sticky="w", padx=14, pady=(4, 8))
+
+    def _refresh_json_col_menu(self):
+        """Actualiza el dropdown de segmentación; auto-selecciona SN por defecto."""
+        values = self.columns if self.columns else ["(sin columnas)"]
+        self.json_seg_col_menu.configure(values=values)
+
+        # Auto-seleccionar la columna SN (directa o a través del rename_map)
+        default = values[0]
+        for real, preset in self.column_rename_map.items():
+            if preset == "SN" and real in values:
+                default = real
+                break
+        else:
+            if "SN" in values:
+                default = "SN"
+        self.json_seg_col_var.set(default)
+        self._update_json_dest_label()
+
+    def _update_json_dest_label(self):
+        """Actualiza la etiqueta de ruta de destino con la columna de segmentación activa."""
+        if not self.filepath.get():
+            self.json_dest_label.configure(
+                text="<carpeta del CSV> / JSON / <valor_segmento>.json"
+            )
+            return
+        p       = Path(self.filepath.get())
+        seg_col = self.json_seg_col_var.get()
+        self.json_dest_label.configure(
+            text=f"{p.parent / 'JSON'}\\<{seg_col}>.json   (un archivo por valor único)"
+        )
+
+    def _open_json_dest_folder(self):
+        """Abre en el Explorador la carpeta JSON de destino (la crea si no existe)."""
+        if not self.filepath.get():
+            messagebox.showwarning("Sin archivo", "Cargá un archivo CSV primero.")
+            return
+        folder = Path(self.filepath.get()).parent / "JSON"
+        folder.mkdir(parents=True, exist_ok=True)
+        os.startfile(str(folder))
+
+    def export_json_start(self):
+        """Valida la configuración e inicia la exportación JSON en un hilo de fondo."""
+        if not self.filepath.get():
+            messagebox.showwarning("Sin archivo", "Cargá un archivo CSV primero.")
+            return
+
+        seg_col = self.json_seg_col_var.get()
+        if not seg_col or seg_col == "(sin columnas)":
+            messagebox.showwarning("Exportar JSON", "Seleccioná una columna para segmentar.")
+            return
+
+        # Determinar qué columnas incluir en el JSON
+        if self.json_cols_var.get() == "selected":
+            cols = [col for col, var in self.column_vars.items() if var.get()]
+            if not cols:
+                messagebox.showwarning(
+                    "Exportar JSON",
+                    "No hay columnas seleccionadas en el panel izquierdo.\n"
+                    "Marcá al menos una o elegí «Todas las columnas».",
+                )
+                return
+        else:
+            cols = list(self.columns)
+
+        # Asegurar que la columna de segmentación esté incluida
+        if seg_col not in cols:
+            cols = [seg_col] + cols
+
+        self.json_status_label.configure(text="⏳ Leyendo archivo...", text_color="orange")
+        self.json_progress_bar.set(0)
+        self._show_overlay("🗂  Exportando JSON...")
+
+        threading.Thread(
+            target=self._export_json_thread,
+            args=(seg_col, cols),
+            daemon=True,
+        ).start()
+
+    def _export_json_thread(self, seg_col: str, columns: list[str]):
+        """Lee el CSV en segundo plano, agrupa filas y escribe un JSON por valor de seg_col."""
+        try:
+            input_path = Path(self.filepath.get())
+            output_dir = input_path.parent / "JSON"
+            output_dir.mkdir(parents=True, exist_ok=True)
+
+            # ── Fase 1: lectura del CSV (overlay activo) ──────────────────────
+            groups = collect_rows_by_group(
+                filepath        = str(input_path),
+                encoding        = self.detected_encoding,
+                delimiter       = self.detected_delimiter,
+                group_column    = seg_col,
+                columns_to_read = columns,
+                rename_map      = dict(self.column_rename_map),
+            )
+
+            # ── Fase 2: escritura de archivos JSON (ocultar overlay, mostrar progreso) ──
+            self.after(0, self._hide_overlay)
+            total  = max(len(groups), 1)
+            n_rows = 0
+            for idx, (seg_val, records) in enumerate(groups.items()):
+                safe_name = sanitize_filename(seg_val)
+                out_file  = output_dir / f"{safe_name}.json"
+                with open(str(out_file), "w", encoding="utf-8") as fh:
+                    json.dump(records, fh, ensure_ascii=False, indent=4)
+                n_rows += len(records)
+                pct = (idx + 1) / total
+                self.after(0, lambda p=pct: self.json_progress_bar.set(p))
+
+            msg   = (
+                f"✓  {len(groups)} archivo(s) creado(s)  |  "
+                f"{n_rows:,} filas  →  {output_dir}"
+            )
+            color = ("green", "#4ec94e")
+
+        except Exception as exc:
+            self.after(0, self._hide_overlay)
+            msg   = f"Error: {exc}"
+            color = "red"
+
+        self.after(0, self._hide_overlay)
+        self.after(0, lambda: self.json_progress_bar.set(1.0))
+        self.after(0, lambda m=msg, c=color: self.json_status_label.configure(text=m, text_color=c))
 
     # ─────────────────────────────────────────────────────────────────────────
     # Carpeta de salida
