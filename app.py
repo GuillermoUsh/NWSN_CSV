@@ -539,39 +539,44 @@ class CSVProcessorApp(ctk.CTk):
     # ─────────────────────────────────────────────────────────────────────────
 
     def _show_overlay(self, text: str = "⏳  Procesando..."):
-        """Muestra un panel que cubre toda la ventana mientras se ejecuta una tarea pesada."""
+        """Muestra un panel semitransparente sobre la ventana; la UI de fondo sigue visible."""
         if self._overlay and self._overlay.winfo_exists():
             return  # ya hay un overlay activo
 
-        overlay = ctk.CTkFrame(self, fg_color=("gray82", "gray18"), corner_radius=0)
-        overlay.place(relx=0, rely=0, relwidth=1, relheight=1)
+        # Obtener posición y tamaño actuales de la ventana principal
+        self.update_idletasks()
+        x = self.winfo_rootx()
+        y = self.winfo_rooty()
+        w = self.winfo_width()
+        h = self.winfo_height()
+
+        # Toplevel sin decoración de ventana, posicionado exactamente encima
+        overlay = tk.Toplevel(self)
+        overlay.overrideredirect(True)           # sin barra de título ni bordes
+        overlay.geometry(f"{w}x{h}+{x}+{y}")
         overlay.lift()
+        overlay.attributes("-topmost", True)
+        overlay.attributes("-alpha", 0.52)       # 52% opaco → UI de fondo visible al 48%
+        overlay.configure(bg="#0d1117")
 
-        # Caja central con mensaje y barra de progreso indeterminada
-        box = ctk.CTkFrame(overlay, corner_radius=14)
-        box.place(relx=0.5, rely=0.5, anchor="center")
+        # Caja de texto posicionada en el tercio superior para no tapar la barra de progreso
+        box = tk.Frame(overlay, bg="#1c3557", relief="flat", bd=0)
+        box.place(relx=0.5, rely=0.28, anchor="center")
 
-        ctk.CTkLabel(
+        tk.Label(
             box, text=text,
             font=("Segoe UI", 16, "bold"),
-        ).pack(padx=50, pady=(28, 10))
-
-        bar = ctk.CTkProgressBar(box, mode="indeterminate", width=260, height=12)
-        bar.pack(padx=50, pady=(0, 28))
-        bar.start()
+            bg="#1c3557", fg="white",
+            padx=52, pady=24,
+        ).pack()
 
         self._overlay     = overlay
-        self._overlay_bar = bar
+        self._overlay_bar = None   # sin barra interna; la barra del tab queda visible detrás
         self.update_idletasks()
 
     def _hide_overlay(self):
-        """Detiene la animación y destruye el overlay de procesamiento."""
-        if self._overlay_bar:
-            try:
-                self._overlay_bar.stop()
-            except Exception:
-                pass
-            self._overlay_bar = None
+        """Destruye el overlay semitransparente."""
+        self._overlay_bar = None
         if self._overlay:
             try:
                 self._overlay.destroy()
