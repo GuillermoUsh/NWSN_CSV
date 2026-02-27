@@ -81,6 +81,8 @@ class CSVProcessorApp(ctk.CTk):
         self.df_preview                                = None
         self.column_rename_map: dict[str, str]         = {}      # {col_real → nombre_preset}
         self.date_transforms:   dict[str, str]         = {}      # {columna  → fecha_base YYYY-MM-DD}
+        self._overlay:          ctk.CTkFrame | None    = None    # panel de bloqueo durante procesamiento
+        self._overlay_bar:      ctk.CTkProgressBar | None = None
 
         self._setup_treeview_style()
         self._build_ui()
@@ -145,7 +147,7 @@ class CSVProcessorApp(ctk.CTk):
     # ── Barra superior: selección de archivo ─────────────────────────────────
 
     def _build_top_bar(self):
-        """Barra superior: botón abrir CSV, etiqueta de ruta y badge de metadatos."""
+        """Barra superior: botón abrir CSV, etiqueta de ruta, badge de metadatos y toggle de tema."""
         top = ctk.CTkFrame(self)
         top.grid(row=0, column=0, sticky="ew", padx=12, pady=(12, 4))
         top.grid_columnconfigure(2, weight=1)
@@ -161,11 +163,23 @@ class CSVProcessorApp(ctk.CTk):
         )
         self.file_label.grid(row=0, column=1, columnspan=2, sticky="ew", padx=4)
 
+        # Botón toggle claro/oscuro — ícono cambia según el modo actual
+        _icon = "☀️" if ctk.get_appearance_mode().lower() == "dark" else "🌙"
+        self._theme_btn = ctk.CTkButton(
+            top, text=_icon, command=self._toggle_theme,
+            width=42, height=36,
+            font=("Segoe UI", 17),
+            fg_color=("gray80", "gray25"),
+            hover_color=("gray70", "gray35"),
+            text_color=("gray10", "gray90"),
+        )
+        self._theme_btn.grid(row=0, column=3, padx=(4, 12), pady=10)
+
         self.info_badge = ctk.CTkLabel(
             top, text="Sin archivo cargado",
             font=("Segoe UI", 12), text_color="gray",
         )
-        self.info_badge.grid(row=1, column=0, columnspan=3, sticky="w", padx=14, pady=(0, 6))
+        self.info_badge.grid(row=1, column=0, columnspan=4, sticky="w", padx=14, pady=(0, 6))
 
     # ── Área principal: panel de columnas + tabs ──────────────────────────────
 
@@ -226,17 +240,26 @@ class CSVProcessorApp(ctk.CTk):
         self.split_note.grid(row=4, column=0, sticky="w", padx=10, pady=(0, 8))
 
     def _build_right_tabs(self, parent):
-        """Crea el tabview con las pestañas Vista Previa, Filtros y Transformar."""
+        """Crea el tabview con las pestañas Vista Previa y Exportar TXT."""
         self.tabview = ctk.CTkTabview(parent)
         self.tabview.grid(row=0, column=1, sticky="nsew")
 
-        self.tabview.add("Vista Previa")
-        self.tabview.add("Exportar TXT")
+        self.tabview.add("   Vista Previa   ")
+        self.tabview.add("   Exportar TXT   ")
         # self.tabview.add("Filtros")       # TODO: descomentar para reactivar
         # self.tabview.add("Transformar")   # TODO: descomentar para reactivar
 
-        self._build_preview_tab(self.tabview.tab("Vista Previa"))
-        self._build_export_txt_tab(self.tabview.tab("Exportar TXT"))
+        # Hacer los botones de pestaña más grandes y visibles
+        try:
+            self.tabview._segmented_button.configure(
+                font=("Segoe UI", 13, "bold"),
+                height=38,
+            )
+        except Exception:
+            pass
+
+        self._build_preview_tab(self.tabview.tab("   Vista Previa   "))
+        self._build_export_txt_tab(self.tabview.tab("   Exportar TXT   "))
         # self._build_filter_tab(self.tabview.tab("Filtros"))
         # self._build_transform_tab(self.tabview.tab("Transformar"))
 
@@ -433,7 +456,7 @@ class CSVProcessorApp(ctk.CTk):
     # ─────────────────────────────────────────────────────────────────────────
 
     def load_file(self):
-        """Abre el diálogo de archivo, detecta encoding y delimitador, carga la preview."""
+        """Abre el diálogo, muestra overlay y lanza la carga en hilo de fondo."""
         path = filedialog.askopenfilename(
             title="Seleccionar archivo CSV",
             filetypes=[("CSV files", "*.csv *.txt"), ("Todos los archivos", "*.*")],
@@ -441,60 +464,149 @@ class CSVProcessorApp(ctk.CTk):
         if not path:
             return
 
-        self.filepath.set(path)
         # Resetear estado derivado del archivo anterior
+        self.filepath.set(path)
         self.column_rename_map = {}
         self.date_transforms   = {}
         self.df_preview        = None
-        # Carpeta de salida = misma carpeta del CSV + subcarpeta "ForModels"
         self.output_dir.set(str(Path(path).parent / "ForModels"))
 
         self.info_badge.configure(text="Detectando codificación y delimitador...", text_color="orange")
         self.status_label.configure(text="Cargando archivo...", text_color="gray")
+
+        # Mostrar overlay bloqueante y procesar en segundo plano
+        self._show_overlay("📂  Abriendo archivo...")
+        threading.Thread(target=self._load_file_thread, args=(path,), daemon=True).start()
+
+    def _load_file_thread(self, path: str):
+        """Detecta encoding/delimitador y carga la preview en hilo de fondo."""
+        try:
+            encoding   = detect_encoding(path)
+            delimiter  = detect_delimiter(path, encoding)
+            columns    = get_columns(path, encoding, delimiter)
+            df_preview = get_preview(path, encoding, delimiter, nrows=PREVIEW_ROWS)
+            self.after(0, lambda: self._load_file_done(path, encoding, delimiter, columns, df_preview))
+        except Exception as exc:
+            self.after(0, lambda e=exc: self._load_file_error(e))
+
+    def _load_file_done(self, path: str, encoding: str, delimiter: str, columns: list, df_preview):
+        """Actualiza la UI tras una carga exitosa del archivo (se ejecuta en el hilo principal)."""
+        self._hide_overlay()
+        self.detected_encoding  = encoding
+        self.detected_delimiter = delimiter
+        self.columns            = columns
+        self.df_preview         = df_preview
+
+        delim_names  = {",": "coma", ";": "punto y coma", "\t": "tabulación"}
+        delim_str    = delim_names.get(delimiter, repr(delimiter))
+        file_size_mb = os.path.getsize(path) / 1_048_576
+
+        self.info_badge.configure(
+            text=(
+                f"Codificación: {encoding}  |  "
+                f"Delimitador: {delim_str}  |  "
+                f"Columnas: {len(columns)}  |  "
+                f"Tamaño: {file_size_mb:.1f} MB"
+            ),
+            text_color=("gray30", "gray70"),
+        )
+
+        self._refresh_column_checkboxes()
+        self._refresh_preview_table()
+        self._refresh_txt_col_menu()
+        # self._refresh_filter_col_menu()      # TODO: descomentar al reactivar Filtros
+        # self._refresh_transform_col_menu()   # TODO: descomentar al reactivar Transformar
+        # self._refresh_transform_list()       # TODO: descomentar al reactivar Transformar
+
+        first_col = columns[0] if columns else "?"
+        self.split_note.configure(
+            text=f"ℹ Los archivos se dividirán por los valores de la columna: «{first_col}»"
+        )
+        self.status_label.configure(
+            text=f"Archivo cargado. Vista previa de {len(df_preview)} filas.",
+            text_color="gray",
+        )
+
+    def _load_file_error(self, exc: Exception):
+        """Muestra error de carga y oculta el overlay (se ejecuta en el hilo principal)."""
+        self._hide_overlay()
+        messagebox.showerror("Error al cargar", f"No se pudo leer el archivo:\n\n{exc}")
+        self.info_badge.configure(text="Error al cargar el archivo.", text_color="red")
+        self.status_label.configure(text="Error.", text_color="red")
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Overlay de procesamiento (bloquea la UI con un panel semitransparente)
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def _show_overlay(self, text: str = "⏳  Procesando..."):
+        """Muestra un panel que cubre toda la ventana mientras se ejecuta una tarea pesada."""
+        if self._overlay and self._overlay.winfo_exists():
+            return  # ya hay un overlay activo
+
+        overlay = ctk.CTkFrame(self, fg_color=("gray82", "gray18"), corner_radius=0)
+        overlay.place(relx=0, rely=0, relwidth=1, relheight=1)
+        overlay.lift()
+
+        # Caja central con mensaje y barra de progreso indeterminada
+        box = ctk.CTkFrame(overlay, corner_radius=14)
+        box.place(relx=0.5, rely=0.5, anchor="center")
+
+        ctk.CTkLabel(
+            box, text=text,
+            font=("Segoe UI", 16, "bold"),
+        ).pack(padx=50, pady=(28, 10))
+
+        bar = ctk.CTkProgressBar(box, mode="indeterminate", width=260, height=12)
+        bar.pack(padx=50, pady=(0, 28))
+        bar.start()
+
+        self._overlay     = overlay
+        self._overlay_bar = bar
         self.update_idletasks()
 
+    def _hide_overlay(self):
+        """Detiene la animación y destruye el overlay de procesamiento."""
+        if self._overlay_bar:
+            try:
+                self._overlay_bar.stop()
+            except Exception:
+                pass
+            self._overlay_bar = None
+        if self._overlay:
+            try:
+                self._overlay.destroy()
+            except Exception:
+                pass
+            self._overlay = None
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Toggle de tema claro / oscuro
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def _toggle_theme(self):
+        """Alterna entre modo claro y oscuro, actualizando colores del Treeview y el canvas."""
+        current  = ctk.get_appearance_mode().lower()
+        new_mode = "Light" if current == "dark" else "Dark"
+        ctk.set_appearance_mode(new_mode)
+
+        # Actualizar ícono del botón: sol en modo claro, luna en modo oscuro
+        self._theme_btn.configure(text="☀️" if new_mode == "Light" else "🌙")
+
+        # Actualizar paleta del Treeview
+        self._setup_treeview_style()
+
+        # Actualizar fondo del frame contenedor del árbol y el canvas de encabezado
         try:
-            self.detected_encoding  = detect_encoding(path)
-            self.detected_delimiter = detect_delimiter(path, self.detected_encoding)
-            self.columns            = get_columns(path, self.detected_encoding, self.detected_delimiter)
-            self.df_preview         = get_preview(
-                path, self.detected_encoding, self.detected_delimiter, nrows=PREVIEW_ROWS
-            )
+            self.tree.master.configure(bg=self._tree_colors["bg"])
+            self._header_canvas.configure(bg=self._tree_colors["header_bg"])
+        except Exception:
+            pass
 
-            delim_names = {",": "coma", ";": "punto y coma", "\t": "tabulación"}
-            delim_str   = delim_names.get(self.detected_delimiter, repr(self.detected_delimiter))
-            file_size_mb = os.path.getsize(path) / 1_048_576
-
-            self.info_badge.configure(
-                text=(
-                    f"Codificación: {self.detected_encoding}  |  "
-                    f"Delimitador: {delim_str}  |  "
-                    f"Columnas: {len(self.columns)}  |  "
-                    f"Tamaño: {file_size_mb:.1f} MB"
-                ),
-                text_color=("gray30", "gray70"),
-            )
-
-            self._refresh_column_checkboxes()
+        # Refrescar la vista previa si hay datos cargados
+        if self.df_preview is not None:
             self._refresh_preview_table()
-            self._refresh_txt_col_menu()
-            # self._refresh_filter_col_menu()      # TODO: descomentar al reactivar Filtros
-            # self._refresh_transform_col_menu()   # TODO: descomentar al reactivar Transformar
-            # self._refresh_transform_list()       # TODO: descomentar al reactivar Transformar
-
-            first_col = self.columns[0] if self.columns else "?"
-            self.split_note.configure(
-                text=f"ℹ Los archivos se dividirán por los valores de la columna: «{first_col}»"
-            )
-            self.status_label.configure(
-                text=f"Archivo cargado. Vista previa de {len(self.df_preview)} filas.",
-                text_color="gray",
-            )
-
-        except Exception as exc:
-            messagebox.showerror("Error al cargar", f"No se pudo leer el archivo:\n\n{exc}")
-            self.info_badge.configure(text="Error al cargar el archivo.", text_color="red")
-            self.status_label.configure(text="Error.", text_color="red")
+        else:
+            self._redraw_header_canvas()
 
     # ─────────────────────────────────────────────────────────────────────────
     # Checkboxes de columnas
@@ -970,17 +1082,19 @@ class CSVProcessorApp(ctk.CTk):
         )
         self.txt_dest_label.grid(row=1, column=0, sticky="w", padx=12, pady=(2, 10))
 
+        # Botón "Abrir carpeta" con colores explícitos para ser visible en ambos modos
         ctk.CTkButton(
             dest_frame,
             text="📂  Abrir carpeta",
             command=self._open_txt_dest_folder,
-            width=140, height=30,
-            font=("Segoe UI", 11),
-            fg_color="transparent",
-            border_width=1,
+            width=150, height=32,
+            font=("Segoe UI", 11, "bold"),
+            fg_color=("gray75", "gray30"),
+            hover_color=("gray65", "gray40"),
+            text_color=("gray10", "gray90"),
         ).grid(row=1, column=1, padx=(4, 12), pady=(2, 10), sticky="e")
 
-        # ── Botón exportar + estado ───────────────────────────────────────────
+        # ── Botón exportar + barra de progreso + estado ───────────────────────
         ctk.CTkButton(
             parent,
             text="📄  Exportar TXT",
@@ -990,11 +1104,16 @@ class CSVProcessorApp(ctk.CTk):
             fg_color="#2d7d46", hover_color="#1f5c32",
         ).grid(row=2, column=0, padx=12, pady=(6, 4), sticky="w")
 
+        # Barra de progreso para la exportación TXT
+        self.txt_progress_bar = ctk.CTkProgressBar(parent, height=10)
+        self.txt_progress_bar.grid(row=3, column=0, sticky="ew", padx=12, pady=(0, 2))
+        self.txt_progress_bar.set(0)
+
         self.txt_status_label = ctk.CTkLabel(
             parent, text="", text_color="gray",
             font=("Segoe UI", 13, "bold"), anchor="w", wraplength=580,
         )
-        self.txt_status_label.grid(row=3, column=0, sticky="w", padx=14, pady=(4, 8))
+        self.txt_status_label.grid(row=4, column=0, sticky="w", padx=14, pady=(4, 8))
 
     def _update_txt_preview(self):
         """Actualiza la vista previa del formato TXT al cambiar la opción de formato."""
@@ -1091,8 +1210,11 @@ class CSVProcessorApp(ctk.CTk):
                 )
                 return
 
-        self.txt_status_label.configure(text="⏳ Procesando...", text_color="orange")
-        self.update_idletasks()
+        self.txt_status_label.configure(text="⏳ Leyendo archivo...", text_color="orange")
+        self.txt_progress_bar.set(0)
+
+        # Overlay bloqueante mientras dura la lectura del CSV
+        self._show_overlay("📄  Exportando TXT...")
 
         threading.Thread(
             target=self._export_txt_thread,
@@ -1101,7 +1223,7 @@ class CSVProcessorApp(ctk.CTk):
         ).start()
 
     def _export_txt_thread(self, col: str, fmt: str, group_col: str | None):
-        """Lee el CSV en segundo plano, extrae valores únicos y escribe los TXT."""
+        """Lee el CSV en segundo plano, extrae valores únicos y escribe los TXT con progreso."""
 
         def write_values(filepath, values):
             """Escribe la lista de valores en el formato elegido."""
@@ -1116,6 +1238,7 @@ class CSVProcessorApp(ctk.CTk):
 
             if group_col:
                 # ── Modo agrupado: un archivo por valor de group_col ──────────
+                # Fase 1 — lectura del CSV (lenta); overlay activo
                 groups = get_unique_values_by_group(
                     filepath     = str(input_path),
                     encoding     = self.detected_encoding,
@@ -1123,29 +1246,39 @@ class CSVProcessorApp(ctk.CTk):
                     value_column = col,
                     group_column = group_col,
                 )
+                # Fase 2 — escritura de archivos; ocultar overlay y mostrar progreso
+                self.after(0, self._hide_overlay)
+                total   = max(len(groups), 1)
                 n_total = 0
-                for group_val, values in groups.items():
+                for idx, (group_val, values) in enumerate(groups.items()):
                     out_file = output_dir / (sanitize_filename(group_val) + ".txt")
                     write_values(out_file, values)
                     n_total += len(values)
+                    pct = (idx + 1) / total
+                    self.after(0, lambda p=pct: self.txt_progress_bar.set(p))
                 msg = (
                     f"✓  {len(groups)} archivo(s) creado(s)  |  "
                     f"{n_total:,} valores en total  →  {output_dir}"
                 )
             else:
                 # ── Modo sin agrupar: un solo archivo ─────────────────────────
+                # Fase 1 — lectura; overlay activo
                 values = get_unique_column_values(
                     filepath  = str(input_path),
                     encoding  = self.detected_encoding,
                     delimiter = self.detected_delimiter,
                     column    = col,
                 )
+                # Fase 2 — escritura; ocultar overlay
+                self.after(0, self._hide_overlay)
                 out_file = output_dir / (input_path.stem + ".txt")
                 write_values(out_file, values)
+                self.after(0, lambda: self.txt_progress_bar.set(1.0))
                 msg = f"✓  {len(values):,} valores únicos exportados  →  {out_file}"
 
             color = ("green", "#4ec94e")
         except Exception as exc:
+            self.after(0, self._hide_overlay)
             msg   = f"Error: {exc}"
             color = "red"
 
