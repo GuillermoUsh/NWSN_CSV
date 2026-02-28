@@ -262,6 +262,116 @@ def collect_rows_by_group(
     return groups
 
 
+def collect_rows_by_two_groups(
+    filepath:         str,
+    encoding:         str,
+    delimiter:        str,
+    folder_column:    str,
+    file_column:      str,
+    columns_to_read:  list[str],
+    rename_map:       Optional[dict[str, str]] = None,
+) -> dict[str, dict[str, list[dict]]]:
+    """
+    Lee el CSV en chunks y devuelve {folder_val: {file_val: [rows_as_dicts]}}.
+
+    Genera la jerarquía: JSON/<folder_val>/<file_val>.json
+    Ambas columnas de agrupación deben existir en el CSV.
+    """
+    def _key(col: str) -> str:
+        if rename_map and col in rename_map:
+            return rename_map[col]
+        return col
+
+    result: dict[str, dict[str, list[dict]]] = {}
+    chunk_iter = None
+    try:
+        chunk_iter = pd.read_csv(
+            filepath,
+            sep=delimiter,
+            encoding=encoding,
+            chunksize=25_000,
+            dtype=str,
+            on_bad_lines="skip",
+            engine="python",
+        )
+        for chunk in chunk_iter:
+            chunk = chunk.fillna("")
+            if folder_column not in chunk.columns or file_column not in chunk.columns:
+                continue
+            available = [c for c in columns_to_read if c in chunk.columns]
+            key_map   = {c: _key(c) for c in available}
+            for folder_val, folder_df in chunk.groupby(folder_column, sort=False):
+                folder_val = str(folder_val).strip()
+                if not folder_val:
+                    continue
+                for file_val, file_df in folder_df.groupby(file_column, sort=False):
+                    file_val = str(file_val).strip()
+                    if not file_val:
+                        continue
+                    sub     = file_df[available].rename(columns=key_map)
+                    records = sub.to_dict(orient="records")
+                    result.setdefault(folder_val, {}).setdefault(file_val, []).extend(records)
+    finally:
+        if chunk_iter is not None:
+            chunk_iter.close()
+    return result
+
+
+def search_value_in_csv(
+    filepath:        str,
+    encoding:        str,
+    delimiter:       str,
+    search_column:   str,
+    search_value:    str,
+    columns_to_read: Optional[list[str]] = None,
+    cancel_fn:       Optional[Callable[[], bool]] = None,
+) -> list[dict]:
+    """
+    Busca `search_value` (exacta, case-insensitive) en `search_column`.
+
+    Devuelve lista de dicts con:
+      '_file'  → nombre del archivo (basename)
+      '_row'   → número de fila en el CSV (2-based; la fila 1 es el encabezado)
+      + todas las columnas disponibles (o solo las de `columns_to_read` si se especifica)
+
+    Si `cancel_fn` es provisto y devuelve True, la búsqueda se interrumpe al final
+    del chunk actual y retorna los resultados parciales hasta ese momento.
+    """
+    results: list[dict] = []
+    chunk_iter = None
+    sv = search_value.strip().lower()
+    try:
+        chunk_iter = pd.read_csv(
+            filepath,
+            sep=delimiter,
+            encoding=encoding,
+            chunksize=25_000,
+            dtype=str,
+            on_bad_lines="skip",
+            engine="python",
+        )
+        basename = Path(filepath).name
+        for chunk in chunk_iter:
+            if cancel_fn and cancel_fn():
+                break
+            chunk = chunk.fillna("")
+            if search_column not in chunk.columns:
+                continue
+            mask    = chunk[search_column].str.strip().str.lower() == sv
+            matched = chunk[mask]
+            if columns_to_read:
+                avail   = [c for c in columns_to_read if c in matched.columns]
+                matched = matched[avail]
+            for orig_idx, row in matched.iterrows():
+                rec = {"_file": basename, "_row": orig_idx + 2}   # +2: encabezado en fila 1
+                rec.update(row.to_dict())
+                results.append(rec)
+    finally:
+        if chunk_iter is not None:
+            chunk_iter.close()
+    return results
+
+
 def get_unique_values_by_group(
     filepath:     str,
     encoding:     str,

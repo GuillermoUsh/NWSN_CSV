@@ -2,6 +2,7 @@
 app.py — Interfaz gráfica con CustomTkinter para el CSV Processor.
 """
 
+import csv
 import json
 import os
 import queue
@@ -21,8 +22,10 @@ from processor import (
     get_unique_column_values,
     get_unique_values_by_group,
     collect_rows_by_group,
+    collect_rows_by_two_groups,
     sanitize_filename,
     process_csv,
+    search_value_in_csv,
 )
 
 PREVIEW_ROWS = 200
@@ -39,7 +42,50 @@ PRESET_COLUMNS = [
     "KEYMATERIAL",
 ]
 
+# Mapa preset → clave camelCase que se usa como key en el JSON exportado
+PRESET_TO_JSON_KEY: dict[str, str] = {
+    "PHONEMODEL_NAME": "phoneModelName",
+    "SN":              "sn",
+    "KEYUNITBARCODE":  "keyUnitBarcode",
+    "CLASSCODE":       "classCode",
+    "CREATETIME":      "createTime",
+    "KEYMATERIAL":     "keyMaterial",
+}
+
+# Traducción de códigos de clase → descripción completa para el JSON
+CLASS_CODE_MAP: dict[str, str] = {
+    "AT":    "Battery_AT",
+    "KTL":   "Front_Housing_KTL",
+    "HS":    "Rear_Camera_HS",
+    "XB":    "Sub_PCB_XB",
+    "CDQ":   "CargadorCP_CDQ",
+    "BF":    "CableUsbCP_BF",
+    "QS":    "Front_Camera_QS",
+    "BLB":   "Modulo_Speaker_BLB",
+    "BC":    "Rear_Housing_BC",
+    "MFP":   "Main FPC",
+    "INLAY": "Battery_Cover_INLAY",
+    "AD":    "Placa_Main_AD",
+    "FP":    "Finger_Print_FP",
+    "MT":    "Vibrator_MT",
+    "CY":    "Receiver_CY",
+    "SZT":   "BracketSuperiorPN",
+    "XZT":   "BracketInferiorPN",
+}
+
 # Paleta de colores para el Treeview según el modo claro/oscuro
+# Paleta de colores para diferenciar resultados por archivo de origen (dark, light)
+SEARCH_FILE_PALETTE = [
+    ("#1e3d28", "#d4edda"),   # verde
+    ("#1a2f4a", "#cce0f5"),   # azul
+    ("#3d2a10", "#fde8c8"),   # naranja
+    ("#2d1a3d", "#ead5f5"),   # violeta
+    ("#3d1a1f", "#f5d5d8"),   # rojo/rosa
+    ("#1a3d3a", "#c8ede9"),   # teal
+    ("#3a3200", "#f5f0c0"),   # amarillo oscuro
+    ("#1a1a3d", "#d5d5f5"),   # índigo
+]
+
 TREE_COLORS = {
     "dark": {
         "bg":         "#2b2b2b",
@@ -85,6 +131,15 @@ class CSVProcessorApp(ctk.CTk):
         self.date_transforms:   dict[str, str]         = {}      # {columna  → fecha_base YYYY-MM-DD}
         self._overlay:          ctk.CTkFrame | None    = None    # panel de bloqueo durante procesamiento
         self._overlay_bar:      ctk.CTkProgressBar | None = None
+        self._json_cancel:      bool                   = False   # señal de cancelación JSON
+        self._txt_cancel:       bool                   = False   # señal de cancelación TXT
+        self._csv_cancel:       bool                   = False   # señal de cancelación CSV
+        # ── Estado pestaña Buscar ──────────────────────────────────────────────
+        self.search_files:      list[str]              = []      # rutas de CSVs cargados
+        self._search_cancel:    bool                   = False   # señal de cancelación búsqueda
+        self.search_results:    list[dict]             = []      # resultados de la última búsqueda
+        self.search_rename_map: dict[str, str]         = {}      # {col_real → nombre_preset} búsqueda
+        self._search_json_last_dir: "Path | None"      = None    # última carpeta JSON exportada (buscar)
 
         self._setup_treeview_style()
         self._build_ui()
@@ -153,6 +208,7 @@ class CSVProcessorApp(ctk.CTk):
         top = ctk.CTkFrame(self)
         top.grid(row=0, column=0, sticky="ew", padx=12, pady=(12, 4))
         top.grid_columnconfigure(2, weight=1)
+        self.top_bar = top
 
         ctk.CTkButton(
             top, text="📂  Abrir CSV", command=self.load_file,
@@ -191,12 +247,15 @@ class CSVProcessorApp(ctk.CTk):
         main.grid(row=1, column=0, sticky="nsew", padx=12, pady=4)
         main.grid_columnconfigure(1, weight=1)
         main.grid_rowconfigure(0, weight=1)
+        self.main_frame = main                          # referencia para toggle de paneles
         self._build_column_panel(main)
+        self._build_search_files_panel(main)            # panel alternativo para tab Buscar
         self._build_right_tabs(main)
 
     def _build_column_panel(self, parent):
         """Panel izquierdo con checkboxes para seleccionar las columnas de salida."""
         panel = ctk.CTkFrame(parent, width=275)
+        self.col_panel = panel                                          # referencia para toggle
         panel.grid(row=0, column=0, sticky="nsew", padx=(0, 6))
         panel.grid_propagate(False)
         panel.grid_columnconfigure(0, weight=1)
@@ -242,32 +301,173 @@ class CSVProcessorApp(ctk.CTk):
         self.split_note.grid(row=4, column=0, sticky="w", padx=10, pady=(0, 8))
 
     def _build_right_tabs(self, parent):
-        """Crea el tabview con las pestañas Vista Previa y Exportar TXT."""
+        """Crea el tabview con las pestañas Exportar CSV, Exportar TXT, Exportar JSON y Buscar."""
         self.tabview = ctk.CTkTabview(parent)
         self.tabview.grid(row=0, column=1, sticky="nsew")
 
-        self.tabview.add("   Vista Previa   ")
+        self.tabview.add("   Exportar CSV   ")
         self.tabview.add("   Exportar TXT   ")
         self.tabview.add("   Exportar JSON   ")
+        self.tabview.add("   Buscar   ")
         # self.tabview.add("Filtros")       # TODO: descomentar para reactivar
         # self.tabview.add("Transformar")   # TODO: descomentar para reactivar
 
         # Hacer los botones de pestaña más grandes y visibles
+        # y envolver el callback original para inyectar el toggle de panel
         try:
+            _orig_cb = self.tabview._segmented_button_callback
+
+            def _tab_cb_with_panel_toggle(value: str, _orig=_orig_cb):
+                _orig(value)                  # cambia el tab normalmente
+                self._on_tab_change(value)    # alterna el panel izquierdo
+
             self.tabview._segmented_button.configure(
                 font=("Segoe UI", 13, "bold"),
                 height=38,
+                command=_tab_cb_with_panel_toggle,
             )
         except Exception:
             pass
 
-        self._build_preview_tab(self.tabview.tab("   Vista Previa   "))
+        self._build_preview_tab(self.tabview.tab("   Exportar CSV   "))
         self._build_export_txt_tab(self.tabview.tab("   Exportar TXT   "))
         self._build_export_json_tab(self.tabview.tab("   Exportar JSON   "))
+        self._build_search_tab(self.tabview.tab("   Buscar   "))
         # self._build_filter_tab(self.tabview.tab("Filtros"))
         # self._build_transform_tab(self.tabview.tab("Transformar"))
 
-    # ── Tab: Vista Previa ────────────────────────────────────────────────────
+    # ── Panel toggle: columnas ↔ archivos de búsqueda ────────────────────────
+
+    # Tabs que NO usan la top bar (Abrir CSV) ni la bottom bar (PROCESAR)
+    _TABS_NO_TOP    = {"Buscar"}
+    _TABS_NO_BOTTOM = {"Buscar", "Exportar TXT", "Exportar JSON"}
+
+    def _on_tab_change(self, value: str):
+        """Controla la visibilidad de paneles y barras según el tab activo:
+          - Top bar (Abrir CSV): visible en todos excepto Buscar
+          - Bottom bar (PROCESAR): solo visible en Exportar CSV
+          - Panel izquierdo: columnas en tabs normales, lista de archivos en Buscar
+        """
+        tab = value.strip()
+
+        # Panel izquierdo
+        if tab == "Buscar":
+            self.col_panel.grid_remove()
+            self.search_files_panel.grid()
+        else:
+            self.search_files_panel.grid_remove()
+            self.col_panel.grid()
+
+        # Top bar
+        if tab in self._TABS_NO_TOP:
+            self.top_bar.grid_remove()
+        else:
+            self.top_bar.grid()
+
+        # Bottom bar
+        if tab in self._TABS_NO_BOTTOM:
+            self.bottom_bar.grid_remove()
+        else:
+            self.bottom_bar.grid()
+
+    def _build_search_files_panel(self, parent):
+        """Panel izquierdo alternativo para la pestaña Buscar: lista de archivos CSV."""
+        panel = ctk.CTkFrame(parent, width=275)
+        panel.grid(row=0, column=0, sticky="nsew", padx=(0, 6))
+        panel.grid_propagate(False)
+        panel.grid_columnconfigure(0, weight=1)
+        panel.grid_rowconfigure(1, weight=1)
+        panel.grid_remove()                          # oculto por defecto (visible solo en Buscar)
+        self.search_files_panel = panel
+
+        # Encabezado
+        ctk.CTkLabel(
+            panel, text="Archivos CSV",
+            font=("Segoe UI", 13, "bold"),
+        ).grid(row=0, column=0, padx=10, pady=(10, 4), sticky="w")
+
+        # Lista scrollable de archivos
+        self.search_files_listbox = ctk.CTkScrollableFrame(panel, label_text="")
+        self.search_files_listbox.grid(row=1, column=0, sticky="nsew", padx=6, pady=4)
+        self.search_files_listbox.grid_columnconfigure(0, weight=1)
+
+        # Botones Agregar / Limpiar
+        btn_frame = ctk.CTkFrame(panel, fg_color="transparent")
+        btn_frame.grid(row=2, column=0, sticky="ew", padx=6, pady=(0, 8))
+        btn_frame.grid_columnconfigure(0, weight=1)
+        btn_frame.grid_columnconfigure(1, weight=1)
+
+        ctk.CTkButton(
+            btn_frame, text="＋  Agregar CSV",
+            command=self._add_search_files, height=32,
+        ).grid(row=0, column=0, sticky="ew", padx=(0, 3))
+        ctk.CTkButton(
+            btn_frame, text="✕  Limpiar",
+            command=self._clear_search_files, height=32,
+            fg_color="#7d2d2d", hover_color="#5c1f1f",
+        ).grid(row=0, column=1, sticky="ew", padx=(3, 0))
+
+    def _add_search_files(self):
+        """Abre el diálogo de selección y agrega los archivos elegidos a la lista."""
+        paths = filedialog.askopenfilenames(
+            title="Seleccionar archivo(s) CSV",
+            filetypes=[("CSV", "*.csv"), ("Texto", "*.txt"), ("Todos", "*.*")],
+        )
+        changed = False
+        for p in paths:
+            if p not in self.search_files:
+                self.search_files.append(p)
+                changed = True
+        if changed:
+            self.search_rename_map = {}
+            self._render_search_files_list()
+            self._refresh_search_col_menu()
+            self._check_search_preset_columns()
+
+    def _clear_search_files(self):
+        """Elimina todos los archivos de la lista de búsqueda."""
+        self.search_files.clear()
+        self.search_rename_map = {}
+        self._render_search_files_list()
+        self._refresh_search_col_menu()
+
+    def _remove_search_file(self, path: str):
+        """Elimina un archivo específico de la lista."""
+        if path in self.search_files:
+            self.search_files.remove(path)
+            self.search_rename_map = {}
+            self._render_search_files_list()
+            self._refresh_search_col_menu()
+
+    def _render_search_files_list(self):
+        """Redibuja la lista de archivos CSV cargados para búsqueda."""
+        for w in self.search_files_listbox.winfo_children():
+            w.destroy()
+        if not self.search_files:
+            ctk.CTkLabel(
+                self.search_files_listbox,
+                text="Sin archivos. Usá «＋ Agregar CSV».",
+                text_color="gray", font=("Segoe UI", 10),
+                wraplength=230, justify="left",
+            ).grid(row=0, column=0, pady=10, padx=4)
+            return
+        for i, path in enumerate(self.search_files):
+            row_f = ctk.CTkFrame(self.search_files_listbox, fg_color="transparent")
+            row_f.grid(row=i, column=0, sticky="ew", pady=1)
+            row_f.grid_columnconfigure(0, weight=1)
+            ctk.CTkLabel(
+                row_f, text=Path(path).name,
+                anchor="w", font=("Segoe UI", 10),
+                wraplength=200,
+            ).grid(row=0, column=0, sticky="ew", padx=4)
+            ctk.CTkButton(
+                row_f, text="✕", width=24, height=24,
+                command=lambda p=path: self._remove_search_file(p),
+                fg_color="transparent", hover_color="#5c1f1f",
+                font=("Segoe UI", 10),
+            ).grid(row=0, column=1, padx=(2, 0))
+
+    # ── Tab: Exportar CSV ────────────────────────────────────────────────────
 
     def _build_preview_tab(self, parent):
         """Canvas de encabezado custom + Treeview de datos con scrollbars sincronizadas."""
@@ -417,6 +617,7 @@ class CSVProcessorApp(ctk.CTk):
         bottom = ctk.CTkFrame(self)
         bottom.grid(row=2, column=0, sticky="ew", padx=12, pady=(4, 12))
         bottom.grid_columnconfigure(1, weight=1)
+        self.bottom_bar = bottom
 
         ctk.CTkLabel(bottom, text="Carpeta de salida:", anchor="e", width=130).grid(
             row=0, column=0, padx=(12, 4), pady=8
@@ -436,22 +637,53 @@ class CSVProcessorApp(ctk.CTk):
                 delim_frame, text=label, variable=self.out_delimiter, value=val
             ).pack(side="left", padx=10)
 
+        proc_btns_frame = ctk.CTkFrame(bottom, fg_color="transparent")
+        proc_btns_frame.grid(row=0, column=3, rowspan=2, padx=12, pady=8)
         self.process_btn = ctk.CTkButton(
-            bottom, text="▶  PROCESAR",
+            proc_btns_frame, text="▶  PROCESAR",
             command=self.start_processing,
             font=("Segoe UI", 13, "bold"),
             width=160, height=40,
             fg_color="#2d7d46", hover_color="#1f5c32",
         )
-        self.process_btn.grid(row=0, column=3, rowspan=2, padx=12, pady=8)
+        self.process_btn.pack(pady=(0, 4))
+        self.csv_cancel_btn = ctk.CTkButton(
+            proc_btns_frame,
+            text="✕  Cancelar",
+            command=self._cancel_processing,
+            font=("Segoe UI", 11, "bold"),
+            width=160, height=30,
+            fg_color="#7d2d2d", hover_color="#5c1f1f",
+            state="disabled",
+        )
+        self.csv_cancel_btn.pack(pady=(0, 4))
 
-        self.progress_bar = ctk.CTkProgressBar(bottom, height=14)
-        self.progress_bar.grid(row=2, column=0, columnspan=3, sticky="ew", padx=12, pady=(0, 4))
+        self.open_output_btn = ctk.CTkButton(
+            proc_btns_frame,
+            text="📂  Abrir carpeta",
+            command=self._open_output_folder,
+            font=("Segoe UI", 11, "bold"),
+            width=160, height=30,
+            fg_color="#5a3a8a", hover_color="#3d2560",
+            state="disabled",
+        )
+        self.open_output_btn.pack()
+
+        main_prog_frame = ctk.CTkFrame(bottom, fg_color="transparent")
+        main_prog_frame.grid(row=2, column=0, columnspan=4, sticky="ew", padx=12, pady=(0, 4))
+        main_prog_frame.grid_columnconfigure(0, weight=1)
+        self.progress_bar = ctk.CTkProgressBar(main_prog_frame, height=20)
+        self.progress_bar.grid(row=0, column=0, sticky="ew", padx=(0, 8))
         self.progress_bar.set(0)
+        self.progress_pct_label = ctk.CTkLabel(
+            main_prog_frame, text="0%",
+            font=("Segoe UI", 16, "bold"), width=56, anchor="e",
+        )
+        self.progress_pct_label.grid(row=0, column=1)
 
         self.status_label = ctk.CTkLabel(
             bottom, text="Listo.", text_color="gray", anchor="w",
-            font=("Segoe UI", 9),
+            font=("Segoe UI", 13, "bold"),
         )
         self.status_label.grid(row=3, column=0, columnspan=4, sticky="w", padx=12, pady=(0, 8))
 
@@ -473,7 +705,7 @@ class CSVProcessorApp(ctk.CTk):
         self.column_rename_map = {}
         self.date_transforms   = {}
         self.df_preview        = None
-        self.output_dir.set(str(Path(path).parent / "ForModels"))
+        self.output_dir.set(str(Path(path).parent / "ForModelsCSV"))
 
         self.info_badge.configure(text="Detectando codificación y delimitador...", text_color="orange")
         self.status_label.configure(text="Cargando archivo...", text_color="gray")
@@ -684,6 +916,9 @@ class CSVProcessorApp(ctk.CTk):
                     self.column_rename_map[real_col] = preset_col
 
         self._on_column_change()
+        # Refrescar menús de TXT y JSON para que usen el nuevo mapeo (ej. SN → STR_PSN)
+        self._refresh_txt_col_menu()
+        self._refresh_json_col_menu()
 
     # ─────────────────────────────────────────────────────────────────────────
     # Preview table
@@ -989,6 +1224,7 @@ class CSVProcessorApp(ctk.CTk):
     def _build_export_txt_tab(self, parent):
         """Tab para exportar valores únicos de una columna a archivos TXT."""
         parent.grid_columnconfigure(0, weight=1)
+        parent.grid_rowconfigure(1, weight=1)   # fila espaciadora → empuja controles al fondo
 
         # ── Panel de configuración ────────────────────────────────────────────
         cfg = ctk.CTkFrame(parent)
@@ -1072,7 +1308,7 @@ class CSVProcessorApp(ctk.CTk):
 
         # ── Ruta de destino — recuadro prominente ─────────────────────────────
         dest_frame = ctk.CTkFrame(parent, fg_color=("#dbe8f5", "#1a3a5c"), corner_radius=8)
-        dest_frame.grid(row=1, column=0, sticky="ew", padx=8, pady=(6, 4))
+        dest_frame.grid(row=2, column=0, sticky="ew", padx=8, pady=(6, 4))
         dest_frame.grid_columnconfigure(0, weight=1)
         dest_frame.grid_columnconfigure(1, weight=0)
 
@@ -1104,26 +1340,46 @@ class CSVProcessorApp(ctk.CTk):
             text_color=("gray10", "gray90"),
         ).grid(row=1, column=1, padx=(4, 12), pady=(2, 10), sticky="e")
 
-        # ── Botón exportar + barra de progreso + estado ───────────────────────
+        # ── Botones exportar/cancelar + barra de progreso + estado ─────────────
+        txt_btns_frame = ctk.CTkFrame(parent, fg_color="transparent")
+        txt_btns_frame.grid(row=3, column=0, padx=12, pady=(6, 4), sticky="w")
         ctk.CTkButton(
-            parent,
+            txt_btns_frame,
             text="📄  Exportar TXT",
             command=self.export_txt_start,
             height=38,
             font=("Segoe UI", 12, "bold"),
             fg_color="#2d7d46", hover_color="#1f5c32",
-        ).grid(row=2, column=0, padx=12, pady=(6, 4), sticky="w")
+        ).pack(side="left", padx=(0, 8))
+        self.txt_cancel_btn = ctk.CTkButton(
+            txt_btns_frame,
+            text="✕  Cancelar",
+            command=self._cancel_txt,
+            height=38,
+            font=("Segoe UI", 12, "bold"),
+            fg_color="#7d2d2d", hover_color="#5c1f1f",
+            state="disabled",
+        )
+        self.txt_cancel_btn.pack(side="left")
 
         # Barra de progreso para la exportación TXT
-        self.txt_progress_bar = ctk.CTkProgressBar(parent, height=10)
-        self.txt_progress_bar.grid(row=3, column=0, sticky="ew", padx=12, pady=(0, 2))
+        txt_prog_frame = ctk.CTkFrame(parent, fg_color="transparent")
+        txt_prog_frame.grid(row=4, column=0, sticky="ew", padx=12, pady=(0, 2))
+        txt_prog_frame.grid_columnconfigure(0, weight=1)
+        self.txt_progress_bar = ctk.CTkProgressBar(txt_prog_frame, height=20)
+        self.txt_progress_bar.grid(row=0, column=0, sticky="ew", padx=(0, 8))
         self.txt_progress_bar.set(0)
+        self.txt_pct_label = ctk.CTkLabel(
+            txt_prog_frame, text="0%",
+            font=("Segoe UI", 16, "bold"), width=56, anchor="e",
+        )
+        self.txt_pct_label.grid(row=0, column=1)
 
         self.txt_status_label = ctk.CTkLabel(
             parent, text="", text_color="gray",
             font=("Segoe UI", 13, "bold"), anchor="w", wraplength=580,
         )
-        self.txt_status_label.grid(row=4, column=0, sticky="w", padx=14, pady=(4, 8))
+        self.txt_status_label.grid(row=5, column=0, sticky="w", padx=14, pady=(4, 8))
 
     def _update_txt_preview(self):
         """Actualiza la vista previa del formato TXT al cambiar la opción de formato."""
@@ -1144,7 +1400,7 @@ class CSVProcessorApp(ctk.CTk):
         if not self.filepath.get():
             messagebox.showwarning("Sin archivo", "Cargá un archivo CSV primero.")
             return
-        folder = Path(self.filepath.get()).parent / "TXT"
+        folder = Path(self.filepath.get()).parent / "Export_TXT"
         folder.mkdir(parents=True, exist_ok=True)
         os.startfile(str(folder))
 
@@ -1156,7 +1412,7 @@ class CSVProcessorApp(ctk.CTk):
             )
             return
         p          = Path(self.filepath.get())
-        txt_folder = p.parent / "TXT"
+        txt_folder = p.parent / "Export_TXT"
         if self.txt_group_var.get() == "column":
             grp_col = self.txt_grp_col_var.get()
             self.txt_dest_label.configure(
@@ -1222,9 +1478,9 @@ class CSVProcessorApp(ctk.CTk):
 
         self.txt_status_label.configure(text="⏳ Leyendo archivo...", text_color="orange")
         self.txt_progress_bar.set(0)
-
-        # Overlay bloqueante mientras dura la lectura del CSV
-        self._show_overlay("📄  Exportando TXT...")
+        self.txt_pct_label.configure(text="0%")
+        self._txt_cancel = False
+        self.txt_cancel_btn.configure(state="normal")
 
         threading.Thread(
             target=self._export_txt_thread,
@@ -1243,12 +1499,11 @@ class CSVProcessorApp(ctk.CTk):
 
         try:
             input_path = Path(self.filepath.get())
-            output_dir = input_path.parent / "TXT"
+            output_dir = input_path.parent / "Export_TXT"
             output_dir.mkdir(parents=True, exist_ok=True)
 
             if group_col:
                 # ── Modo agrupado: un archivo por valor de group_col ──────────
-                # Fase 1 — lectura del CSV (lenta); overlay activo
                 groups = get_unique_values_by_group(
                     filepath     = str(input_path),
                     encoding     = self.detected_encoding,
@@ -1256,42 +1511,49 @@ class CSVProcessorApp(ctk.CTk):
                     value_column = col,
                     group_column = group_col,
                 )
-                # Fase 2 — escritura de archivos; ocultar overlay y mostrar progreso
-                self.after(0, self._hide_overlay)
                 total   = max(len(groups), 1)
                 n_total = 0
+                n_files = 0
                 for idx, (group_val, values) in enumerate(groups.items()):
+                    if self._txt_cancel:
+                        break
                     out_file = output_dir / (sanitize_filename(group_val) + ".txt")
                     write_values(out_file, values)
                     n_total += len(values)
-                    pct = (idx + 1) / total
+                    n_files += 1
+                    pct     = (idx + 1) / total
+                    pct_int = int(pct * 100)
                     self.after(0, lambda p=pct: self.txt_progress_bar.set(p))
-                msg = (
-                    f"✓  {len(groups)} archivo(s) creado(s)  |  "
-                    f"{n_total:,} valores en total  →  {output_dir}"
-                )
+                    self.after(0, lambda t=pct_int: self.txt_pct_label.configure(text=f"{t}%"))
+                if self._txt_cancel:
+                    msg   = f"Cancelado  |  {n_files} archivo(s) escrito(s)  |  {n_total:,} valores"
+                    color = "orange"
+                else:
+                    msg   = (
+                        f"✓  {len(groups)} archivo(s) creado(s)  |  "
+                        f"{n_total:,} valores en total  →  {output_dir}"
+                    )
+                    color = ("green", "#4ec94e")
             else:
                 # ── Modo sin agrupar: un solo archivo ─────────────────────────
-                # Fase 1 — lectura; overlay activo
                 values = get_unique_column_values(
                     filepath  = str(input_path),
                     encoding  = self.detected_encoding,
                     delimiter = self.detected_delimiter,
                     column    = col,
                 )
-                # Fase 2 — escritura; ocultar overlay
-                self.after(0, self._hide_overlay)
                 out_file = output_dir / (input_path.stem + ".txt")
                 write_values(out_file, values)
-                self.after(0, lambda: self.txt_progress_bar.set(1.0))
-                msg = f"✓  {len(values):,} valores únicos exportados  →  {out_file}"
+                msg   = f"✓  {len(values):,} valores únicos exportados  →  {out_file}"
+                color = ("green", "#4ec94e")
 
-            color = ("green", "#4ec94e")
         except Exception as exc:
-            self.after(0, self._hide_overlay)
             msg   = f"Error: {exc}"
             color = "red"
 
+        self.after(0, lambda: self.txt_cancel_btn.configure(state="disabled"))
+        self.after(0, lambda: self.txt_progress_bar.set(1.0))
+        self.after(0, lambda: self.txt_pct_label.configure(text="100%"))
         self.after(0, lambda m=msg, c=color: self.txt_status_label.configure(text=m, text_color=c))
 
     # ─────────────────────────────────────────────────────────────────────────
@@ -1299,39 +1561,53 @@ class CSVProcessorApp(ctk.CTk):
     # ─────────────────────────────────────────────────────────────────────────
 
     def _build_export_json_tab(self, parent):
-        """Tab para exportar el CSV segmentado como archivos JSON."""
+        """Tab para exportar el CSV segmentado en carpetas/archivos JSON (dos niveles)."""
         parent.grid_columnconfigure(0, weight=1)
+        parent.grid_rowconfigure(1, weight=1)   # fila espaciadora → empuja controles al fondo
 
         # ── Panel de configuración ────────────────────────────────────────────
         cfg = ctk.CTkFrame(parent)
         cfg.grid(row=0, column=0, sticky="ew", padx=6, pady=(6, 4))
         cfg.grid_columnconfigure(1, weight=1)
 
-        # Selector de columna para segmentar
-        ctk.CTkLabel(cfg, text="Segmentar por:", width=130, anchor="e").grid(
+        # Nivel 1: columna que define la CARPETA
+        ctk.CTkLabel(cfg, text="Carpetas por:", width=140, anchor="e").grid(
             row=0, column=0, padx=(10, 4), pady=8
         )
-        self.json_seg_col_var  = tk.StringVar(value="(sin columnas)")
-        self.json_seg_col_menu = ctk.CTkOptionMenu(
+        self.json_folder_col_var  = tk.StringVar(value="(sin columnas)")
+        self.json_folder_col_menu = ctk.CTkOptionMenu(
             cfg,
-            variable=self.json_seg_col_var,
+            variable=self.json_folder_col_var,
             values=["(sin columnas)"],
             command=lambda _: self._update_json_dest_label(),
         )
-        self.json_seg_col_menu.grid(row=0, column=1, sticky="ew", padx=(0, 10), pady=8)
+        self.json_folder_col_menu.grid(row=0, column=1, sticky="ew", padx=(0, 10), pady=8)
+
+        # Nivel 2: columna que define el NOMBRE DEL ARCHIVO
+        ctk.CTkLabel(cfg, text="Archivos (JSON) por:", width=140, anchor="e").grid(
+            row=1, column=0, padx=(10, 4), pady=(0, 8)
+        )
+        self.json_file_col_var  = tk.StringVar(value="(sin columnas)")
+        self.json_file_col_menu = ctk.CTkOptionMenu(
+            cfg,
+            variable=self.json_file_col_var,
+            values=["(sin columnas)"],
+            command=lambda _: self._update_json_dest_label(),
+        )
+        self.json_file_col_menu.grid(row=1, column=1, sticky="ew", padx=(0, 10), pady=(0, 8))
 
         # Separador
         ctk.CTkFrame(cfg, height=2, fg_color="gray40").grid(
-            row=1, column=0, columnspan=2, sticky="ew", padx=10, pady=(0, 8)
+            row=2, column=0, columnspan=2, sticky="ew", padx=10, pady=(0, 8)
         )
 
         # Qué columnas incluir en el JSON
-        ctk.CTkLabel(cfg, text="Columnas JSON:", width=130, anchor="e").grid(
-            row=2, column=0, padx=(10, 4), pady=(0, 8)
+        ctk.CTkLabel(cfg, text="Columnas JSON:", width=140, anchor="e").grid(
+            row=3, column=0, padx=(10, 4), pady=(0, 8)
         )
         self.json_cols_var = tk.StringVar(value="selected")
         cols_frame = ctk.CTkFrame(cfg, fg_color="transparent")
-        cols_frame.grid(row=2, column=1, sticky="w", padx=(0, 10), pady=(0, 8))
+        cols_frame.grid(row=3, column=1, sticky="w", padx=(0, 10), pady=(0, 8))
         ctk.CTkRadioButton(
             cols_frame,
             text="Columnas seleccionadas del panel izquierdo",
@@ -1341,20 +1617,21 @@ class CSVProcessorApp(ctk.CTk):
             cols_frame,
             text="Todas las columnas del CSV",
             variable=self.json_cols_var, value="all",
+            command=self.select_all_columns,
         ).pack(anchor="w")
 
         # Nota de formato
         ctk.CTkLabel(
             cfg,
-            text='Formato de salida: [ {"col1": "val", "col2": "val", …}, … ]',
+            text='Estructura: JSON / <carpeta> / <archivo>.json  →  [ {…}, … ]',
             font=("Consolas", 11),
             text_color="gray",
             anchor="w",
-        ).grid(row=3, column=0, columnspan=2, sticky="w", padx=14, pady=(0, 10))
+        ).grid(row=4, column=0, columnspan=2, sticky="w", padx=14, pady=(0, 10))
 
         # ── Ruta de destino — recuadro prominente ─────────────────────────────
         dest_frame = ctk.CTkFrame(parent, fg_color=("#dbe8f5", "#1a3a5c"), corner_radius=8)
-        dest_frame.grid(row=1, column=0, sticky="ew", padx=8, pady=(6, 4))
+        dest_frame.grid(row=2, column=0, sticky="ew", padx=8, pady=(6, 4))
         dest_frame.grid_columnconfigure(0, weight=1)
         dest_frame.grid_columnconfigure(1, weight=0)
 
@@ -1382,54 +1659,349 @@ class CSVProcessorApp(ctk.CTk):
             text_color=("gray10", "gray90"),
         ).grid(row=1, column=1, padx=(4, 12), pady=(2, 10), sticky="e")
 
-        # ── Botón exportar + barra de progreso + estado ───────────────────────
+        # ── Botones exportar/cancelar + barra de progreso + estado ─────────────
+        json_btns_frame = ctk.CTkFrame(parent, fg_color="transparent")
+        json_btns_frame.grid(row=3, column=0, padx=12, pady=(6, 4), sticky="w")
         ctk.CTkButton(
-            parent,
+            json_btns_frame,
             text="🗂  Exportar JSON",
             command=self.export_json_start,
             height=38,
             font=("Segoe UI", 12, "bold"),
             fg_color="#2d7d46", hover_color="#1f5c32",
-        ).grid(row=2, column=0, padx=12, pady=(6, 4), sticky="w")
+        ).pack(side="left", padx=(0, 8))
+        self.json_cancel_btn = ctk.CTkButton(
+            json_btns_frame,
+            text="✕  Cancelar",
+            command=self._cancel_json,
+            height=38,
+            font=("Segoe UI", 12, "bold"),
+            fg_color="#7d2d2d", hover_color="#5c1f1f",
+            state="disabled",
+        )
+        self.json_cancel_btn.pack(side="left")
 
-        self.json_progress_bar = ctk.CTkProgressBar(parent, height=10)
-        self.json_progress_bar.grid(row=3, column=0, sticky="ew", padx=12, pady=(0, 2))
+        json_prog_frame = ctk.CTkFrame(parent, fg_color="transparent")
+        json_prog_frame.grid(row=4, column=0, sticky="ew", padx=12, pady=(0, 2))
+        json_prog_frame.grid_columnconfigure(0, weight=1)
+        self.json_progress_bar = ctk.CTkProgressBar(json_prog_frame, height=20)
+        self.json_progress_bar.grid(row=0, column=0, sticky="ew", padx=(0, 8))
         self.json_progress_bar.set(0)
+        self.json_pct_label = ctk.CTkLabel(
+            json_prog_frame, text="0%",
+            font=("Segoe UI", 16, "bold"), width=56, anchor="e",
+        )
+        self.json_pct_label.grid(row=0, column=1)
 
         self.json_status_label = ctk.CTkLabel(
             parent, text="", text_color="gray",
             font=("Segoe UI", 13, "bold"), anchor="w", wraplength=580,
         )
-        self.json_status_label.grid(row=4, column=0, sticky="w", padx=14, pady=(4, 8))
+        self.json_status_label.grid(row=5, column=0, sticky="w", padx=14, pady=(4, 8))
+
+    # ── Tab: Buscar ──────────────────────────────────────────────────────────
+
+    def _build_search_tab(self, parent):
+        """Tab para buscar un valor exacto en múltiples archivos CSV y exportar resultados."""
+        parent.grid_columnconfigure(0, weight=1)
+        parent.grid_rowconfigure(5, weight=1)   # treeview de resultados ocupa el espacio sobrante
+
+        # ── Título ────────────────────────────────────────────────────────────
+        ctk.CTkLabel(
+            parent, text="Buscar en archivos CSV",
+            font=("Segoe UI", 14, "bold"), anchor="w",
+        ).grid(row=0, column=0, sticky="w", padx=12, pady=(8, 4))
+
+        # ── Fila 1: campo de búsqueda ─────────────────────────────────────────
+        input_row = ctk.CTkFrame(parent, fg_color="transparent")
+        input_row.grid(row=1, column=0, sticky="ew", padx=12, pady=(0, 4))
+        input_row.grid_columnconfigure(1, weight=1)
+
+        ctk.CTkLabel(
+            input_row, text="Código(s) a buscar:",
+            font=("Segoe UI", 12, "bold"), anchor="ne", width=130,
+        ).grid(row=0, column=0, padx=(0, 8), pady=(4, 0), sticky="ne")
+
+        self.search_input = ctk.CTkTextbox(
+            input_row,
+            height=72, font=("Segoe UI", 13),
+            wrap="none",
+        )
+        self.search_input.grid(row=0, column=1, sticky="ew")
+        # Hint de placeholder manual (se borra al escribir)
+        self.search_input.insert("1.0", "ej: ZY32MJ3LZH\nO varios separados por coma o Enter")
+        self.search_input.configure(text_color="gray60")
+        def _on_focus_in(e):
+            content = self.search_input.get("1.0", "end-1c")
+            if content.startswith("ej:"):
+                self.search_input.delete("1.0", "end")
+                self.search_input.configure(text_color=("gray10", "white"))
+        def _on_focus_out(e):
+            content = self.search_input.get("1.0", "end-1c").strip()
+            if not content:
+                self.search_input.insert("1.0", "ej: ZY32MJ3LZH\nO varios separados por coma o Enter")
+                self.search_input.configure(text_color="gray60")
+        self.search_input.bind("<FocusIn>",  _on_focus_in)
+        self.search_input.bind("<FocusOut>", _on_focus_out)
+        # Ctrl+Enter lanza la búsqueda
+        self.search_input.bind("<Control-Return>", lambda _: self.search_start())
+
+        # ── Fila 2: columna + botones ─────────────────────────────────────────
+        ctrl_row = ctk.CTkFrame(parent, fg_color="transparent")
+        ctrl_row.grid(row=2, column=0, sticky="ew", padx=12, pady=(0, 4))
+
+        ctk.CTkLabel(ctrl_row, text="Buscar en columna:", anchor="e", width=130).grid(
+            row=0, column=0, padx=(0, 8),
+        )
+        self.search_col_var  = tk.StringVar(value="(sin columnas)")
+        self.search_col_menu = ctk.CTkOptionMenu(
+            ctrl_row, variable=self.search_col_var,
+            values=["(sin columnas)"], width=200,
+        )
+        self.search_col_menu.grid(row=0, column=1, padx=(0, 16))
+
+        self.search_btn = ctk.CTkButton(
+            ctrl_row, text="🔍  Buscar",
+            command=self.search_start,
+            height=36, width=130,
+            font=("Segoe UI", 12, "bold"),
+            fg_color="#2d7d46", hover_color="#1f5c32",
+        )
+        self.search_btn.grid(row=0, column=2, padx=(0, 8))
+
+        self.search_cancel_btn = ctk.CTkButton(
+            ctrl_row, text="✕  Cancelar",
+            command=self._cancel_search,
+            height=36, width=130,
+            font=("Segoe UI", 12, "bold"),
+            fg_color="#7d2d2d", hover_color="#5c1f1f",
+            state="disabled",
+        )
+        self.search_cancel_btn.grid(row=0, column=3, padx=(0, 8))
+
+        ctk.CTkButton(
+            ctrl_row, text="🗑  Limpiar",
+            command=self._clear_search_results,
+            height=36, width=110,
+            font=("Segoe UI", 12, "bold"),
+            fg_color="#4a4a4a", hover_color="#2e2e2e",
+        ).grid(row=0, column=4)
+
+        # ── Barra de progreso ─────────────────────────────────────────────────
+        search_prog_frame = ctk.CTkFrame(parent, fg_color="transparent")
+        search_prog_frame.grid(row=3, column=0, sticky="ew", padx=12, pady=(0, 2))
+        search_prog_frame.grid_columnconfigure(0, weight=1)
+
+        self.search_progress_bar = ctk.CTkProgressBar(search_prog_frame, height=20)
+        self.search_progress_bar.grid(row=0, column=0, sticky="ew", padx=(0, 8))
+        self.search_progress_bar.set(0)
+
+        self.search_pct_label = ctk.CTkLabel(
+            search_prog_frame, text="0%",
+            font=("Segoe UI", 16, "bold"), width=56, anchor="e",
+        )
+        self.search_pct_label.grid(row=0, column=1)
+
+        # ── Etiqueta de estado ────────────────────────────────────────────────
+        self.search_status_label = ctk.CTkLabel(
+            parent,
+            text="Agregá archivos CSV en el panel izquierdo e ingresá un valor a buscar.",
+            text_color="gray", font=("Segoe UI", 11),
+            anchor="w", wraplength=700,
+        )
+        self.search_status_label.grid(row=4, column=0, sticky="w", padx=14, pady=(2, 4))
+
+        # ── Treeview de resultados ─────────────────────────────────────────────
+        results_frame = tk.Frame(parent, bg=self._tree_colors["bg"])
+        results_frame.grid(row=5, column=0, sticky="nsew", padx=8, pady=(0, 4))
+        results_frame.grid_columnconfigure(0, weight=1)
+        results_frame.grid_rowconfigure(0, weight=1)
+
+        self.search_tree = ttk.Treeview(
+            results_frame, show="headings", selectmode="browse",
+        )
+        vsb_s = ttk.Scrollbar(results_frame, orient="vertical",   command=self.search_tree.yview)
+        hsb_s = ttk.Scrollbar(results_frame, orient="horizontal", command=self.search_tree.xview)
+        self.search_tree.configure(yscrollcommand=vsb_s.set, xscrollcommand=hsb_s.set)
+        self.search_tree.grid(row=0, column=0, sticky="nsew")
+        vsb_s.grid(row=0, column=1, sticky="ns")
+        hsb_s.grid(row=1, column=0, sticky="ew")
+
+        # ── Fila de exportación JSON ───────────────────────────────────────────
+        export_row = ctk.CTkFrame(parent, fg_color=("#dbe8f5", "#1a3a5c"), corner_radius=8)
+        export_row.grid(row=6, column=0, sticky="ew", padx=8, pady=(4, 8))
+
+        ctk.CTkLabel(
+            export_row,
+            text="📁  Exportar resultados como JSON:",
+            font=("Segoe UI", 12, "bold"), anchor="w",
+        ).grid(row=0, column=0, columnspan=5, sticky="w", padx=12, pady=(8, 4))
+
+        ctk.CTkLabel(export_row, text="Carpetas por:", anchor="e", width=100).grid(
+            row=1, column=0, padx=(12, 4), pady=(0, 10),
+        )
+        self.search_folder_col_var  = tk.StringVar(value="(sin columnas)")
+        self.search_folder_col_menu = ctk.CTkOptionMenu(
+            export_row, variable=self.search_folder_col_var,
+            values=["(sin columnas)"], width=180,
+        )
+        self.search_folder_col_menu.grid(row=1, column=1, padx=(0, 12), pady=(0, 10))
+
+        ctk.CTkLabel(export_row, text="Archivos por:", anchor="e", width=100).grid(
+            row=1, column=2, padx=(0, 4), pady=(0, 10),
+        )
+        self.search_file_col_var  = tk.StringVar(value="(sin columnas)")
+        self.search_file_col_menu = ctk.CTkOptionMenu(
+            export_row, variable=self.search_file_col_var,
+            values=["(sin columnas)"], width=180,
+        )
+        self.search_file_col_menu.grid(row=1, column=3, padx=(0, 12), pady=(0, 10))
+
+        ctk.CTkButton(
+            export_row,
+            text="💾  Exportar JSON",
+            command=self.export_search_json_start,
+            height=36,
+            font=("Segoe UI", 12, "bold"),
+            fg_color="#2d7d46", hover_color="#1f5c32",
+        ).grid(row=1, column=4, padx=(0, 8), pady=(0, 6))
+
+        ctk.CTkButton(
+            export_row,
+            text="📄  Exportar CSV",
+            command=self.export_search_csv_start,
+            height=36,
+            font=("Segoe UI", 12, "bold"),
+            fg_color="#1a5c8a", hover_color="#0f3d5c",
+        ).grid(row=1, column=5, padx=(0, 8), pady=(0, 6))
+
+        self.search_json_open_btn = ctk.CTkButton(
+            export_row,
+            text="📂  Abrir carpeta",
+            command=self._open_search_json_folder,
+            height=36,
+            font=("Segoe UI", 12, "bold"),
+            fg_color="#5a3a8a", hover_color="#3d2560",
+            state="disabled",
+        )
+        self.search_json_open_btn.grid(row=1, column=6, padx=(0, 12), pady=(0, 6))
+
+        # ── Barra de progreso de exportación (row 2) ──────────────────────────
+        export_row.grid_columnconfigure(0, weight=1)
+        exp_prog_frame = ctk.CTkFrame(export_row, fg_color="transparent")
+        exp_prog_frame.grid(row=2, column=0, columnspan=7, sticky="ew", padx=12, pady=(0, 8))
+        exp_prog_frame.grid_columnconfigure(0, weight=1)
+
+        self.search_export_bar = ctk.CTkProgressBar(exp_prog_frame, height=16)
+        self.search_export_bar.grid(row=0, column=0, sticky="ew", padx=(0, 8))
+        self.search_export_bar.set(0)
+
+        self.search_export_pct = ctk.CTkLabel(
+            exp_prog_frame, text="",
+            font=("Segoe UI", 13, "bold"), width=56, anchor="e",
+        )
+        self.search_export_pct.grid(row=0, column=1)
+
+    def _refresh_search_col_menu(self):
+        """Actualiza el dropdown de columna de búsqueda según el primer archivo cargado."""
+        if not self.search_files:
+            self.search_col_menu.configure(values=["(sin columnas)"])
+            self.search_col_var.set("(sin columnas)")
+            return
+        try:
+            enc   = detect_encoding(self.search_files[0])
+            delim = detect_delimiter(self.search_files[0], enc)
+            cols  = get_columns(self.search_files[0], enc, delim)
+        except Exception:
+            cols = []
+        values = cols if cols else ["(sin columnas)"]
+        self.search_col_menu.configure(values=values)
+        # Default: "SN" directo; si no existe, buscar col real mapeada a "SN"
+        if "SN" in values:
+            self.search_col_var.set("SN")
+        else:
+            sn_real = next(
+                (real for real, preset in self.search_rename_map.items()
+                 if preset == "SN" and real in values),
+                None,
+            )
+            self.search_col_var.set(sn_real if sn_real else values[0])
+
+    def _check_search_preset_columns(self):
+        """
+        Verifica si el primer CSV de búsqueda tiene todas las columnas preset.
+        Si faltan, abre el ColumnMapDialog para que el usuario mapee equivalentes.
+        El resultado se guarda en self.search_rename_map = {real_col: preset_col}.
+        """
+        if not self.search_files:
+            return
+        try:
+            enc   = detect_encoding(self.search_files[0])
+            delim = detect_delimiter(self.search_files[0], enc)
+            cols  = get_columns(self.search_files[0], enc, delim)
+        except Exception:
+            return
+        missing = [c for c in PRESET_COLUMNS if c not in cols]
+        if not missing:
+            return  # Todas las columnas preset presentes, no hay nada que mapear
+
+        dialog = ColumnMapDialog(self, missing, cols)
+        self.wait_window(dialog)
+        if dialog.cancelled:
+            return
+
+        # dialog.result = {preset_col: real_col | None}
+        # Invertir a {real_col: preset_col} para renombrar en _search_thread
+        self.search_rename_map = {}
+        for preset_col, real_col in dialog.result.items():
+            if real_col is not None:
+                self.search_rename_map[real_col] = preset_col
+
+        # Refrescar dropdown para que el default SN use el mapeo nuevo
+        self._refresh_search_col_menu()
 
     def _refresh_json_col_menu(self):
-        """Actualiza el dropdown de segmentación; auto-selecciona SN por defecto."""
+        """Actualiza los dropdowns de carpeta y archivo; auto-selecciona por defecto."""
         values = self.columns if self.columns else ["(sin columnas)"]
-        self.json_seg_col_menu.configure(values=values)
+        self.json_folder_col_menu.configure(values=values)
+        self.json_file_col_menu.configure(values=values)
 
-        # Auto-seleccionar la columna SN (directa o a través del rename_map)
-        default = values[0]
+        # Auto-seleccionar PHONEMODEL_NAME para carpetas
+        folder_default = values[0]
+        for real, preset in self.column_rename_map.items():
+            if preset == "PHONEMODEL_NAME" and real in values:
+                folder_default = real
+                break
+        else:
+            if "PHONEMODEL_NAME" in values:
+                folder_default = "PHONEMODEL_NAME"
+        self.json_folder_col_var.set(folder_default)
+
+        # Auto-seleccionar SN para archivos
+        file_default = values[0]
         for real, preset in self.column_rename_map.items():
             if preset == "SN" and real in values:
-                default = real
+                file_default = real
                 break
         else:
             if "SN" in values:
-                default = "SN"
-        self.json_seg_col_var.set(default)
+                file_default = "SN"
+        self.json_file_col_var.set(file_default)
+
         self._update_json_dest_label()
 
     def _update_json_dest_label(self):
-        """Actualiza la etiqueta de ruta de destino con la columna de segmentación activa."""
+        """Actualiza la etiqueta de ruta de destino con la estructura de dos niveles."""
         if not self.filepath.get():
             self.json_dest_label.configure(
-                text="<carpeta del CSV> / JSON / <valor_segmento>.json"
+                text="<carpeta del CSV> / JSON / <carpeta> / <archivo>.json"
             )
             return
-        p       = Path(self.filepath.get())
-        seg_col = self.json_seg_col_var.get()
+        p          = Path(self.filepath.get())
+        folder_col = self.json_folder_col_var.get()
+        file_col   = self.json_file_col_var.get()
         self.json_dest_label.configure(
-            text=f"{p.parent / 'JSON'}\\<{seg_col}>.json   (un archivo por valor único)"
+            text=f"{p.parent / 'Export_JSON'}\\<{folder_col}>\\<{file_col}>.json"
         )
 
     def _open_json_dest_folder(self):
@@ -1437,9 +2009,422 @@ class CSVProcessorApp(ctk.CTk):
         if not self.filepath.get():
             messagebox.showwarning("Sin archivo", "Cargá un archivo CSV primero.")
             return
-        folder = Path(self.filepath.get()).parent / "JSON"
+        folder = Path(self.filepath.get()).parent / "Export_JSON"
         folder.mkdir(parents=True, exist_ok=True)
         os.startfile(str(folder))
+
+    def _cancel_json(self):
+        """Solicita la cancelación de la exportación JSON en curso."""
+        self._json_cancel = True
+        self.json_cancel_btn.configure(state="disabled")
+
+    def _cancel_txt(self):
+        """Solicita la cancelación de la exportación TXT en curso."""
+        self._txt_cancel = True
+        self.txt_cancel_btn.configure(state="disabled")
+
+    def _cancel_processing(self):
+        """Solicita la cancelación del procesamiento CSV en curso."""
+        self._csv_cancel = True
+        self.csv_cancel_btn.configure(state="disabled")
+
+    def _open_output_folder(self):
+        """Abre en el explorador la carpeta de salida configurada."""
+        d = self.output_dir.get()
+        if d and Path(d).exists():
+            os.startfile(d)
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Búsqueda en CSVs — lógica
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def search_start(self):
+        """Valida la configuración e inicia la búsqueda en los archivos cargados.
+        Acepta uno o varios valores separados por coma y/o salto de línea."""
+        raw = self.search_input.get("1.0", "end-1c").strip()
+        if not raw or raw.startswith("ej:"):
+            messagebox.showwarning("Buscar", "Ingresá un valor a buscar.")
+            return
+        # Parsear múltiples valores: separados por coma o newline
+        import re as _re
+        values = [v.strip() for v in _re.split(r"[,\n]+", raw) if v.strip()]
+        if not values:
+            messagebox.showwarning("Buscar", "Ingresá al menos un valor a buscar.")
+            return
+        if not self.search_files:
+            messagebox.showwarning("Buscar", "Agregá al menos un archivo CSV en el panel izquierdo.")
+            return
+        col = self.search_col_var.get()
+        if not col or col == "(sin columnas)":
+            messagebox.showwarning("Buscar", "Seleccioná la columna en la que buscar.")
+            return
+
+        self.search_results.clear()
+        self.search_progress_bar.set(0)
+        self.search_pct_label.configure(text="0%")
+        n_vals = len(values)
+        lbl = f"⏳ Buscando {n_vals} valor(es)..." if n_vals > 1 else "⏳ Buscando..."
+        self.search_status_label.configure(text=lbl, text_color="orange")
+        self._search_cancel = False
+        self.search_cancel_btn.configure(state="normal")
+        self.search_btn.configure(state="disabled")
+
+        threading.Thread(
+            target=self._search_thread,
+            args=(values, col),
+            daemon=True,
+        ).start()
+
+    def _search_thread(self, values: list[str], search_col: str):
+        """Busca cada valor de `values` en `search_col` en todos los archivos cargados."""
+        total       = len(self.search_files) * len(values)
+        step        = 0
+        all_results: list[dict] = []
+
+        for filepath in self.search_files:
+            if self._search_cancel:
+                break
+            try:
+                enc   = detect_encoding(filepath)
+                delim = detect_delimiter(filepath, enc)
+                for value in values:
+                    if self._search_cancel:
+                        break
+                    rows = search_value_in_csv(
+                        filepath      = filepath,
+                        encoding      = enc,
+                        delimiter     = delim,
+                        search_column = search_col,
+                        search_value  = value,
+                        cancel_fn     = lambda: self._search_cancel,
+                    )
+                    all_results.extend(rows)
+                    step   += 1
+                    pct     = step / total
+                    pct_int = int(pct * 100)
+                    self.after(0, lambda p=pct: self.search_progress_bar.set(p))
+                    self.after(0, lambda t=pct_int: self.search_pct_label.configure(text=f"{t}%"))
+            except Exception:
+                step += len(values)   # saltar silenciosamente
+
+        # ── Aplicar mapeo de columnas: renombrar claves reales al nombre preset ──
+        if self.search_rename_map:
+            renamed: list[dict] = []
+            for rec in all_results:
+                new_rec = {}
+                for k, v in rec.items():
+                    new_rec[self.search_rename_map.get(k, k)] = v
+                renamed.append(new_rec)
+            all_results = renamed
+
+        self.search_results = all_results
+
+        # ── Detectar qué columnas preset están disponibles y cuáles faltan ──────
+        all_keys = {k for r in all_results for k in r if k not in ("_file", "_row")}
+        found_preset   = [c for c in PRESET_COLUMNS if c in all_keys]
+        missing_preset = [c for c in PRESET_COLUMNS if c not in all_keys]
+
+        # Para cada columna faltante, sugerir la columna disponible más parecida
+        def _best_match(preset_col: str, available: set) -> str | None:
+            pl = preset_col.lower()
+            for col in sorted(available):
+                if pl in col.lower() or col.lower() in pl:
+                    return col
+            return None
+
+        vals_label = ", ".join(values) if len(values) <= 3 else f"{len(values)} valores"
+        if self._search_cancel:
+            msg   = f"Cancelado  |  {len(all_results):,} resultado(s) parciales"
+            color = "orange"
+        elif not all_results:
+            msg   = f'Sin resultados para: {vals_label}'
+            color = "gray"
+        else:
+            files_found = len({r["_file"] for r in all_results})
+            msg = f"✓  {len(all_results):,} resultado(s) en {files_found} archivo(s)"
+            if missing_preset:
+                hints = []
+                for mc in missing_preset:
+                    suggestion = _best_match(mc, all_keys - set(found_preset))
+                    hints.append(f"{mc} → ¿'{suggestion}'?" if suggestion else mc)
+                msg += f"\n⚠  Columna(s) no encontrada(s): {',  '.join(hints)}"
+            color = ("green", "#4ec94e")
+
+        self.after(0, lambda fp=found_preset: self._populate_search_treeview(all_results, fp))
+        self.after(0, lambda m=msg, c=color: self.search_status_label.configure(text=m, text_color=c))
+        self.after(0, lambda: self.search_cancel_btn.configure(state="disabled"))
+        self.after(0, lambda: self.search_btn.configure(state="normal"))
+        self.after(0, lambda: self.search_progress_bar.set(1.0))
+        self.after(0, lambda: self.search_pct_label.configure(text="100%"))
+
+    def _populate_search_treeview(self, results: list[dict], preset_cols: list[str]):
+        """Actualiza el Treeview mostrando solo las columnas del preset encontradas."""
+        display_cols = ["Archivo", "Fila"] + preset_cols
+        self.search_tree["columns"] = display_cols
+
+        self.search_tree.heading("Archivo", text="Archivo", anchor="w")
+        self.search_tree.column("Archivo", width=200, minwidth=120, anchor="w")
+        self.search_tree.heading("Fila", text="Fila", anchor="center")
+        self.search_tree.column("Fila", width=60, minwidth=50, anchor="center")
+        for col in preset_cols:
+            self.search_tree.heading(col, text=col, anchor="w")
+            self.search_tree.column(col, width=150, minwidth=70, anchor="w")
+
+        # Limpiar y poblar filas
+        for item in self.search_tree.get_children():
+            self.search_tree.delete(item)
+
+        # Asignar un color distinto a cada archivo de origen
+        unique_files = list(dict.fromkeys(r.get("_file", "") for r in results))
+        mode_idx = 0 if ctk.get_appearance_mode().lower() == "dark" else 1
+        file_tag_map: dict[str, str] = {}
+        for i, fname in enumerate(unique_files):
+            tag_name = f"src_file_{i}"
+            bg_color = SEARCH_FILE_PALETTE[i % len(SEARCH_FILE_PALETTE)][mode_idx]
+            self.search_tree.tag_configure(tag_name, background=bg_color)
+            file_tag_map[fname] = tag_name
+
+        for rec in results:
+            vals = [rec.get("_file", ""), rec.get("_row", "")]
+            vals += [rec.get(col, "") for col in preset_cols]
+            tag  = file_tag_map.get(rec.get("_file", ""), "")
+            self.search_tree.insert("", "end", values=vals, tags=(tag,) if tag else ())
+
+        # Actualizar los dropdowns de exportación con las columnas encontradas
+        self._refresh_search_json_col_menus(preset_cols)
+
+    def _cancel_search(self):
+        """Solicita la cancelación de la búsqueda en curso."""
+        self._search_cancel = True
+        self.search_cancel_btn.configure(state="disabled")
+
+    def _clear_search_results(self):
+        """Limpia el campo de búsqueda, el treeview y los resultados en memoria."""
+        self.search_input.delete("1.0", "end")
+        self.search_input.insert("1.0", "ej: ZY32MJ3LZH\nO varios separados por coma o Enter")
+        self.search_input.configure(text_color="gray60")
+        self.search_results.clear()
+        self.search_progress_bar.set(0)
+        self.search_pct_label.configure(text="0%")
+        self.search_status_label.configure(
+            text="Agregá archivos CSV en el panel izquierdo e ingresá un valor a buscar.",
+            text_color="gray",
+        )
+        # Vaciar treeview
+        for item in self.search_tree.get_children():
+            self.search_tree.delete(item)
+        # Resetear dropdowns de exportación
+        self._refresh_search_json_col_menus([])
+        # Deshabilitar botón abrir carpeta
+        self.search_json_open_btn.configure(state="disabled")
+
+    def _refresh_search_json_col_menus(self, cols: list[str]):
+        """Actualiza los dropdowns de carpeta/archivo para la exportación JSON de búsqueda."""
+        values = cols if cols else ["(sin columnas)"]
+        self.search_folder_col_menu.configure(values=values)
+        self.search_file_col_menu.configure(values=values)
+        self.search_folder_col_var.set(
+            "PHONEMODEL_NAME" if "PHONEMODEL_NAME" in values else values[0]
+        )
+        self.search_file_col_var.set(
+            "SN" if "SN" in values else values[0]
+        )
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Exportar JSON de resultados de búsqueda
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def export_search_json_start(self):
+        """Valida y lanza la exportación JSON de los resultados de búsqueda."""
+        if not self.search_results:
+            messagebox.showwarning("Exportar JSON", "No hay resultados de búsqueda. Realizá una búsqueda primero.")
+            return
+        folder_col = self.search_folder_col_var.get()
+        file_col   = self.search_file_col_var.get()
+        if not folder_col or folder_col == "(sin columnas)":
+            messagebox.showwarning("Exportar JSON", "Seleccioná la columna para las carpetas.")
+            return
+        if not file_col or file_col == "(sin columnas)":
+            messagebox.showwarning("Exportar JSON", "Seleccioná la columna para los archivos.")
+            return
+
+        # Exportar junto al primer archivo cargado, en subcarpeta "Search_Export_JSON"
+        base = Path(self.search_files[0]).parent if self.search_files else Path(self.output_dir.get())
+        output_dir = base / "Search_Export_JSON"
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        self.search_status_label.configure(text="⏳ Exportando JSON...", text_color="orange")
+        self.search_export_bar.set(0)
+        self.search_export_pct.configure(text="0%")
+
+        threading.Thread(
+            target=self._export_search_json_thread,
+            args=(folder_col, file_col, output_dir),
+            daemon=True,
+        ).start()
+
+    def _export_search_json_thread(self, folder_col: str, file_col: str, output_dir: Path):
+        """Agrupa los resultados de búsqueda en memoria y escribe los archivos JSON."""
+        _export_success = False
+        try:
+            # Agrupar en memoria (no re-lee los CSVs)
+            grouped: dict[str, dict[str, list[dict]]] = {}
+            for rec in self.search_results:
+                fv  = str(rec.get(folder_col, "")).strip() or "_sin_carpeta"
+                fiv = str(rec.get(file_col,   "")).strip() or "_sin_archivo"
+                grouped.setdefault(fv, {}).setdefault(fiv, []).append(rec)
+
+            total_files = max(sum(len(v) for v in grouped.values()), 1)
+            n_files = 0
+            n_rows  = 0
+
+            for folder_val, files_dict in grouped.items():
+                safe_folder = sanitize_filename(folder_val)
+                folder_path = output_dir / safe_folder
+                folder_path.mkdir(parents=True, exist_ok=True)
+
+                for file_val, records in files_dict.items():
+                    # Transformar: solo columnas PRESET → camelCase (classCode se deja tal cual)
+                    transformed = []
+                    for rec in records:
+                        new_rec = {}
+                        for k, v in rec.items():
+                            if k in ("_file", "_row"):
+                                continue
+                            if k not in PRESET_COLUMNS:        # ignorar columnas no-preset
+                                continue
+                            json_key = PRESET_TO_JSON_KEY.get(k, k)
+                            new_rec[json_key] = v
+                        transformed.append(new_rec)
+
+                    safe_file = sanitize_filename(file_val)
+                    out_file  = folder_path / f"{safe_file}.json"
+                    with open(str(out_file), "w", encoding="utf-8") as fh:
+                        json.dump(transformed, fh, ensure_ascii=False, indent=4)
+
+                    n_rows  += len(transformed)
+                    n_files += 1
+                    pct     = n_files / total_files
+                    pct_int = int(pct * 100)
+                    self.after(0, lambda p=pct: self.search_export_bar.set(p))
+                    self.after(0, lambda t=pct_int: self.search_export_pct.configure(text=f"{t}%"))
+
+            n_folders = len(grouped)
+            msg   = (
+                f"✓  {n_folders} carpeta(s)  |  {n_files} archivo(s)  |  "
+                f"{n_rows:,} filas  →  {output_dir}"
+            )
+            color = ("green", "#4ec94e")
+            self._search_json_last_dir = output_dir
+            _export_success = True
+
+        except Exception as exc:
+            msg   = f"Error: {exc}"
+            color = "red"
+
+        self.after(0, lambda: self.search_export_bar.set(1.0))
+        self.after(0, lambda: self.search_export_pct.configure(text="100%"))
+        self.after(0, lambda m=msg, c=color: self.search_status_label.configure(text=m, text_color=c))
+        if _export_success:
+            self.after(0, lambda: self.search_json_open_btn.configure(state="normal"))
+
+    def _open_search_json_folder(self):
+        """Abre en el explorador la última carpeta JSON/CSV exportada desde el tab Buscar."""
+        if self._search_json_last_dir and self._search_json_last_dir.exists():
+            os.startfile(str(self._search_json_last_dir))
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Exportar CSV de resultados de búsqueda
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def export_search_csv_start(self):
+        """Valida y lanza la exportación CSV de los resultados de búsqueda."""
+        if not self.search_results:
+            messagebox.showwarning("Exportar CSV", "No hay resultados de búsqueda. Realizá una búsqueda primero.")
+            return
+        folder_col = self.search_folder_col_var.get()
+        file_col   = self.search_file_col_var.get()
+        if not folder_col or folder_col == "(sin columnas)":
+            messagebox.showwarning("Exportar CSV", "Seleccioná la columna para las carpetas.")
+            return
+        if not file_col or file_col == "(sin columnas)":
+            messagebox.showwarning("Exportar CSV", "Seleccioná la columna para los archivos.")
+            return
+
+        base = Path(self.search_files[0]).parent if self.search_files else Path(self.output_dir.get())
+        output_dir = base / "Search_Export_CSV"
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        self.search_status_label.configure(text="⏳ Exportando CSV...", text_color="orange")
+        self.search_export_bar.set(0)
+        self.search_export_pct.configure(text="0%")
+
+        threading.Thread(
+            target=self._export_search_csv_thread,
+            args=(folder_col, file_col, output_dir),
+            daemon=True,
+        ).start()
+
+    def _export_search_csv_thread(self, folder_col: str, file_col: str, output_dir: Path):
+        """Agrupa los resultados y escribe un CSV por archivo con las columnas PRESET."""
+        _export_success = False
+        try:
+            # Agrupar en memoria
+            grouped: dict[str, dict[str, list[dict]]] = {}
+            for rec in self.search_results:
+                fv  = str(rec.get(folder_col, "")).strip() or "_sin_carpeta"
+                fiv = str(rec.get(file_col,   "")).strip() or "_sin_archivo"
+                grouped.setdefault(fv, {}).setdefault(fiv, []).append(rec)
+
+            total_files = max(sum(len(v) for v in grouped.values()), 1)
+            n_files = 0
+            n_rows  = 0
+
+            for folder_val, files_dict in grouped.items():
+                safe_folder = sanitize_filename(folder_val)
+                folder_path = output_dir / safe_folder
+                folder_path.mkdir(parents=True, exist_ok=True)
+
+                for file_val, records in files_dict.items():
+                    safe_file = sanitize_filename(file_val)
+                    out_file  = folder_path / f"{safe_file}.csv"
+
+                    with open(str(out_file), "w", newline="", encoding="utf-8-sig") as fh:
+                        writer = csv.DictWriter(
+                            fh,
+                            fieldnames=PRESET_COLUMNS,
+                            extrasaction="ignore",
+                        )
+                        writer.writeheader()
+                        for rec in records:
+                            row = {k: rec.get(k, "") for k in PRESET_COLUMNS}
+                            writer.writerow(row)
+
+                    n_rows  += len(records)
+                    n_files += 1
+                    pct     = n_files / total_files
+                    pct_int = int(pct * 100)
+                    self.after(0, lambda p=pct: self.search_export_bar.set(p))
+                    self.after(0, lambda t=pct_int: self.search_export_pct.configure(text=f"{t}%"))
+
+            n_folders = len(grouped)
+            msg   = (
+                f"✓  {n_folders} carpeta(s)  |  {n_files} archivo(s) CSV  |  "
+                f"{n_rows:,} filas  →  {output_dir}"
+            )
+            color = ("green", "#4ec94e")
+            self._search_json_last_dir = output_dir
+            _export_success = True
+
+        except Exception as exc:
+            msg   = f"Error al exportar CSV: {exc}"
+            color = "red"
+
+        self.after(0, lambda: self.search_export_bar.set(1.0))
+        self.after(0, lambda: self.search_export_pct.configure(text="100%"))
+        self.after(0, lambda m=msg, c=color: self.search_status_label.configure(text=m, text_color=c))
+        if _export_success:
+            self.after(0, lambda: self.search_json_open_btn.configure(state="normal"))
 
     def export_json_start(self):
         """Valida la configuración e inicia la exportación JSON en un hilo de fondo."""
@@ -1447,9 +2432,13 @@ class CSVProcessorApp(ctk.CTk):
             messagebox.showwarning("Sin archivo", "Cargá un archivo CSV primero.")
             return
 
-        seg_col = self.json_seg_col_var.get()
-        if not seg_col or seg_col == "(sin columnas)":
-            messagebox.showwarning("Exportar JSON", "Seleccioná una columna para segmentar.")
+        folder_col = self.json_folder_col_var.get()
+        file_col   = self.json_file_col_var.get()
+        if not folder_col or folder_col == "(sin columnas)":
+            messagebox.showwarning("Exportar JSON", "Seleccioná una columna para las carpetas.")
+            return
+        if not file_col or file_col == "(sin columnas)":
+            messagebox.showwarning("Exportar JSON", "Seleccioná una columna para los archivos.")
             return
 
         # Determinar qué columnas incluir en el JSON
@@ -1465,63 +2454,99 @@ class CSVProcessorApp(ctk.CTk):
         else:
             cols = list(self.columns)
 
-        # Asegurar que la columna de segmentación esté incluida
-        if seg_col not in cols:
-            cols = [seg_col] + cols
+        # Asegurar que ambas columnas de segmentación estén incluidas
+        if folder_col not in cols:
+            cols = [folder_col] + cols
+        if file_col not in cols:
+            cols = [file_col] + cols
 
         self.json_status_label.configure(text="⏳ Leyendo archivo...", text_color="orange")
         self.json_progress_bar.set(0)
-        self._show_overlay("🗂  Exportando JSON...")
+        self.json_pct_label.configure(text="0%")
+        self._json_cancel = False
+        self.json_cancel_btn.configure(state="normal")
 
         threading.Thread(
             target=self._export_json_thread,
-            args=(seg_col, cols),
+            args=(folder_col, file_col, cols),
             daemon=True,
         ).start()
 
-    def _export_json_thread(self, seg_col: str, columns: list[str]):
-        """Lee el CSV en segundo plano, agrupa filas y escribe un JSON por valor de seg_col."""
+    def _export_json_thread(self, folder_col: str, file_col: str, columns: list[str]):
+        """Lee el CSV en segundo plano y escribe un JSON por SN dentro de carpetas por phoneModelName."""
         try:
             input_path = Path(self.filepath.get())
-            output_dir = input_path.parent / "JSON"
+            output_dir = input_path.parent / "Export_JSON"
             output_dir.mkdir(parents=True, exist_ok=True)
 
             # ── Fase 1: lectura del CSV (overlay activo) ──────────────────────
-            groups = collect_rows_by_group(
+            result = collect_rows_by_two_groups(
                 filepath        = str(input_path),
                 encoding        = self.detected_encoding,
                 delimiter       = self.detected_delimiter,
-                group_column    = seg_col,
+                folder_column   = folder_col,
+                file_column     = file_col,
                 columns_to_read = columns,
                 rename_map      = dict(self.column_rename_map),
             )
 
-            # ── Fase 2: escritura de archivos JSON (ocultar overlay, mostrar progreso) ──
-            self.after(0, self._hide_overlay)
-            total  = max(len(groups), 1)
-            n_rows = 0
-            for idx, (seg_val, records) in enumerate(groups.items()):
-                safe_name = sanitize_filename(seg_val)
-                out_file  = output_dir / f"{safe_name}.json"
-                with open(str(out_file), "w", encoding="utf-8") as fh:
-                    json.dump(records, fh, ensure_ascii=False, indent=4)
-                n_rows += len(records)
-                pct = (idx + 1) / total
-                self.after(0, lambda p=pct: self.json_progress_bar.set(p))
+            # ── Fase 2: escritura de archivos JSON (mostrar progreso) ──────────
+            total_files = max(sum(len(files) for files in result.values()), 1)
+            n_files = 0
+            n_rows  = 0
 
-            msg   = (
-                f"✓  {len(groups)} archivo(s) creado(s)  |  "
-                f"{n_rows:,} filas  →  {output_dir}"
-            )
-            color = ("green", "#4ec94e")
+            for folder_val, files_dict in result.items():
+                if self._json_cancel:
+                    break
+                safe_folder = sanitize_filename(folder_val)
+                folder_path = output_dir / safe_folder
+                folder_path.mkdir(parents=True, exist_ok=True)
+
+                for file_val, records in files_dict.items():
+                    if self._json_cancel:
+                        break
+                    # Transformar cada registro:
+                    #   · renombrar claves al camelCase del preset (CLASSCODE → classCode, etc.)
+                    #   · traducir el valor de classCode a su descripción completa
+                    transformed = []
+                    for rec in records:
+                        new_rec = {}
+                        for k, v in rec.items():
+                            json_key = PRESET_TO_JSON_KEY.get(k, k)   # camelCase si es preset
+                            if json_key == "classCode":
+                                v = CLASS_CODE_MAP.get(v, v)           # descripción completa, fallback al código
+                            new_rec[json_key] = v
+                        transformed.append(new_rec)
+
+                    safe_file = sanitize_filename(file_val)
+                    out_file  = folder_path / f"{safe_file}.json"
+                    with open(str(out_file), "w", encoding="utf-8") as fh:
+                        json.dump(transformed, fh, ensure_ascii=False, indent=4)
+                    n_rows  += len(transformed)
+                    n_files += 1
+                    pct     = n_files / total_files
+                    pct_int = int(pct * 100)
+                    self.after(0, lambda p=pct: self.json_progress_bar.set(p))
+                    self.after(0, lambda t=pct_int: self.json_pct_label.configure(text=f"{t}%"))
+
+            if self._json_cancel:
+                msg   = f"Cancelado  |  {n_files} archivo(s) escrito(s)  |  {n_rows:,} filas"
+                color = "orange"
+            else:
+                n_folders = len(result)
+                msg   = (
+                    f"✓  {n_folders} carpeta(s)  |  {n_files} archivo(s)  |  "
+                    f"{n_rows:,} filas  →  {output_dir}"
+                )
+                color = ("green", "#4ec94e")
 
         except Exception as exc:
-            self.after(0, self._hide_overlay)
             msg   = f"Error: {exc}"
             color = "red"
 
-        self.after(0, self._hide_overlay)
+        self.after(0, lambda: self.json_cancel_btn.configure(state="disabled"))
         self.after(0, lambda: self.json_progress_bar.set(1.0))
+        self.after(0, lambda: self.json_pct_label.configure(text="100%"))
         self.after(0, lambda m=msg, c=color: self.json_status_label.configure(text=m, text_color=c))
 
     # ─────────────────────────────────────────────────────────────────────────
@@ -1556,8 +2581,11 @@ class CSVProcessorApp(ctk.CTk):
         out_delim = delim_map[self.out_delimiter.get()]
 
         self.processing = True
+        self._csv_cancel = False
         self.process_btn.configure(state="disabled", text="⏳ Procesando...")
+        self.csv_cancel_btn.configure(state="normal")
         self.progress_bar.set(0)
+        self.progress_pct_label.configure(text="0%")
         self.status_label.configure(text="Iniciando...", text_color="gray")
 
         # El hilo es daemon: se mata automáticamente si el proceso principal cierra
@@ -1578,6 +2606,8 @@ class CSVProcessorApp(ctk.CTk):
     ):
         """Ejecuta process_csv en segundo plano y publica progreso/resultado en la queue."""
         def cb(pct, msg):
+            if self._csv_cancel:
+                raise InterruptedError("Cancelado por el usuario.")
             self.progress_queue.put(("progress", pct, msg))
 
         try:
@@ -1594,6 +2624,8 @@ class CSVProcessorApp(ctk.CTk):
                 progress_callback= cb,
             )
             self.progress_queue.put(("done", result))
+        except InterruptedError:
+            self.progress_queue.put(("cancelled",))
         except Exception as exc:
             self.progress_queue.put(("error", str(exc)))
 
@@ -1611,6 +2643,7 @@ class CSVProcessorApp(ctk.CTk):
                 if kind == "progress":
                     _, pct, msg = item
                     self.progress_bar.set(pct)
+                    self.progress_pct_label.configure(text=f"{int(pct * 100)}%")
                     self.status_label.configure(text=msg, text_color="gray")
 
                 elif kind == "done":
@@ -1619,8 +2652,11 @@ class CSVProcessorApp(ctk.CTk):
                     n_rows   = result.get("total_rows", 0)
                     split_col = result.get("split_column", "")
                     self.progress_bar.set(1.0)
+                    self.progress_pct_label.configure(text="100%")
                     self.processing = False
                     self.process_btn.configure(state="normal", text="▶  PROCESAR")
+                    self.csv_cancel_btn.configure(state="disabled")
+                    self.open_output_btn.configure(state="normal")
                     self.status_label.configure(
                         text=f"✓  Completado: {n_files} archivo(s) generado(s)  |  {n_rows:,} filas exportadas",
                         text_color=("green", "#4ec94e"),
@@ -1635,10 +2671,20 @@ class CSVProcessorApp(ctk.CTk):
                     )
                     return
 
+                elif kind == "cancelled":
+                    self.processing = False
+                    self.process_btn.configure(state="normal", text="▶  PROCESAR")
+                    self.csv_cancel_btn.configure(state="disabled")
+                    self.progress_bar.set(0)
+                    self.progress_pct_label.configure(text="0%")
+                    self.status_label.configure(text="Cancelado.", text_color="orange")
+                    return
+
                 elif kind == "error":
                     error_msg = item[1]
                     self.processing = False
                     self.process_btn.configure(state="normal", text="▶  PROCESAR")
+                    self.csv_cancel_btn.configure(state="disabled")
                     self.status_label.configure(text=f"Error: {error_msg}", text_color="red")
                     messagebox.showerror("Error en el procesamiento", f"{error_msg}")
                     return
