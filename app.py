@@ -29,7 +29,7 @@ from processor import (
 )
 
 PREVIEW_ROWS = 200
-APP_VERSION  = "1.0"
+APP_VERSION  = "1.1"
 HEADER_H     = 24                    # altura del canvas de encabezado en px
 CENTERED_COLUMNS = {"CLASSCODE"}     # columnas cuyo contenido se centra en la preview
 
@@ -2075,6 +2075,37 @@ class CSVProcessorApp(ctk.CTk):
             daemon=True,
         ).start()
 
+    # Alias conocidos para la columna SN: contienen los mismos datos,
+    # se prueban en orden de prioridad antes de caer al mapeo del usuario.
+    _SN_ALIASES: list[str] = ["SN", "STR_PSN"]
+
+    def _resolve_search_col(self, search_col: str, file_cols: set[str]) -> str | None:
+        """
+        Dado el nombre de columna seleccionado y el conjunto de columnas del archivo,
+        devuelve la columna real a usar o None si no se puede resolver.
+
+        Prioridad:
+          1. Si la búsqueda apunta a SN/STR_PSN, probar los alias en orden (SN > STR_PSN).
+          2. Intentar search_col directamente.
+          3. Intentar el preset lógico mapeado (ej. search_col="COD_SERIE" → preset="SN").
+          4. None → el archivo no tiene la columna buscada.
+        """
+        target_preset = self.search_rename_map.get(search_col, search_col)
+
+        # Si el objetivo es SN-relacionado, usar el alias que exista con mayor prioridad
+        if search_col in self._SN_ALIASES or target_preset in self._SN_ALIASES:
+            for alias in self._SN_ALIASES:
+                if alias in file_cols:
+                    return alias
+
+        # Fallback: columna seleccionada o su preset
+        if search_col in file_cols:
+            return search_col
+        if target_preset in file_cols:
+            return target_preset
+
+        return None
+
     def _search_thread(self, values: list[str], search_col: str):
         """Busca cada valor de `values` en `search_col` en todos los archivos cargados."""
         total       = len(self.search_files) * len(values)
@@ -2087,6 +2118,13 @@ class CSVProcessorApp(ctk.CTk):
             try:
                 enc   = detect_encoding(filepath)
                 delim = detect_delimiter(filepath, enc)
+
+                file_cols  = set(get_columns(filepath, enc, delim))
+                actual_col = self._resolve_search_col(search_col, file_cols)
+                if actual_col is None:
+                    step += len(values)
+                    continue  # este archivo no tiene la columna buscada
+
                 for value in values:
                     if self._search_cancel:
                         break
@@ -2094,7 +2132,7 @@ class CSVProcessorApp(ctk.CTk):
                         filepath      = filepath,
                         encoding      = enc,
                         delimiter     = delim,
-                        search_column = search_col,
+                        search_column = actual_col,
                         search_value  = value,
                         cancel_fn     = lambda: self._search_cancel,
                     )
