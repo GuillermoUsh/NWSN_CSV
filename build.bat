@@ -10,7 +10,7 @@ pip install -r requirements.txt
 
 echo.
 echo [2/3] Compilando con PyInstaller...
-pyinstaller ^
+python -m PyInstaller ^
   --onefile ^
   --windowed ^
   --name "CSV_Processor" ^
