@@ -446,13 +446,41 @@ def process_csv(
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
 
-    # Leer el nombre de la primera columna para usarla como criterio de split
+    # Leer el encabezado y determinar la columna de split
     with open(filepath, "r", encoding=encoding, errors="replace") as f:
         reader = csv.reader(f, delimiter=delimiter)
         original_header = next(reader, [])
     if not original_header:
         raise ValueError("El archivo CSV no tiene cabecera o está vacío.")
-    split_col = original_header[0].strip().strip('"')
+
+    # Normalizar nombres de columnas
+    header_normalized = [col.strip().strip('"') for col in original_header]
+
+    # Determinar columna de split con el siguiente orden de prioridad:
+    # 1. Columna mapeada a PHONEMODEL_NAME en rename_map
+    # 2. PHONEMODEL_NAME directamente
+    # 3. PHONENAME (nombre real de la columna en algunos archivos)
+    # 4. HONEMODEL_NAME (fallback por typo)
+    # 5. Primera columna
+    split_col = None
+
+    # Verificar si hay una columna mapeada a PHONEMODEL_NAME
+    if rename_map:
+        for real_col, preset_col in rename_map.items():
+            if preset_col == "PHONEMODEL_NAME" and real_col in header_normalized:
+                split_col = real_col
+                break
+
+    # Si no se encontró en el mapeo, buscar directamente
+    if split_col is None:
+        for col in header_normalized:
+            if col in ("PHONEMODEL_NAME", "PHONENAME", "HONEMODEL_NAME"):
+                split_col = col
+                break
+
+    # Fallback a la primera columna
+    if split_col is None:
+        split_col = header_normalized[0]
 
     # Estimar total de filas para la barra de progreso
     if progress_callback:
@@ -557,4 +585,125 @@ def process_csv(
         "files_created": files_created,
         "total_rows":    total_written,
         "split_column":  split_col,
+    }
+
+
+# ─── Agregar columna con valor constante ──────────────────────────────────────
+
+def add_column_to_csv(
+    filepath:          str,
+    encoding:          str,
+    delimiter:         str,
+    column_name:       str,
+    column_value:      str,
+    position:          str = "end",
+    after_column:      Optional[str] = None,
+    output_dir:        Optional[str] = None,
+    progress_callback: Optional[Callable[[float, str], None]] = None,
+) -> dict:
+    """
+    Lee un CSV y genera una nueva versión con una columna adicional que tiene
+    el mismo valor en todos los registros.
+
+    Parámetros
+    ----------
+    filepath          : ruta al CSV de entrada
+    encoding          : codificación del archivo
+    delimiter         : delimitador del CSV
+    column_name       : nombre de la nueva columna a agregar
+    column_value      : valor constante para todos los registros
+    position          : "start" (inicio), "end" (final), o "after" (después de after_column)
+    after_column      : nombre de la columna después de la cual insertar (solo si position="after")
+    output_dir        : carpeta de salida (si None, usa la carpeta del archivo original)
+    progress_callback : función (0.0–1.0, mensaje) para actualizar progreso
+    """
+
+    input_path = Path(filepath)
+    if output_dir:
+        output_path = Path(output_dir)
+    else:
+        output_path = input_path.parent / "CSV_con_columna_agregada"
+    output_path.mkdir(parents=True, exist_ok=True)
+
+    output_file = output_path / input_path.name
+
+    # Leer encabezado para determinar posición de inserción
+    with open(filepath, "r", encoding=encoding, errors="replace") as f:
+        reader = csv.reader(f, delimiter=delimiter)
+        original_header = next(reader, [])
+
+    if not original_header:
+        raise ValueError("El archivo CSV no tiene cabecera o está vacío.")
+
+    # Verificar si la columna ya existe
+    if column_name in original_header:
+        raise ValueError(f"La columna '{column_name}' ya existe en el CSV.")
+
+    # Determinar índice de inserción
+    if position == "start":
+        insert_idx = 0
+    elif position == "end":
+        insert_idx = len(original_header)
+    elif position == "after":
+        if not after_column or after_column not in original_header:
+            raise ValueError(f"Columna '{after_column}' no encontrada en el CSV.")
+        insert_idx = original_header.index(after_column) + 1
+    else:
+        raise ValueError(f"Posición inválida: '{position}'. Usa 'start', 'end', o 'after'.")
+
+    # Crear nuevo encabezado con la columna insertada
+    new_header = original_header[:insert_idx] + [column_name] + original_header[insert_idx:]
+
+    # Contar filas para progreso
+    if progress_callback:
+        progress_callback(0.01, "Contando filas...")
+    total_rows = count_rows_fast(filepath)
+
+    # Procesar CSV en chunks
+    rows_processed = 0
+    chunk_iter = None
+
+    try:
+        chunk_iter = pd.read_csv(
+            filepath,
+            sep=delimiter,
+            encoding=encoding,
+            chunksize=25_000,
+            dtype=str,
+            on_bad_lines="skip",
+            engine="python",
+        )
+
+        # Abrir archivo de salida
+        with open(str(output_file), "w", newline="", encoding="utf-8-sig") as out_f:
+            writer = csv.writer(out_f, delimiter=delimiter)
+            writer.writerow(new_header)
+
+            for chunk in chunk_iter:
+                chunk = chunk.fillna("")
+
+                # Insertar la nueva columna con el valor constante
+                chunk.insert(insert_idx, column_name, column_value)
+
+                # Escribir filas
+                for row in chunk[new_header].itertuples(index=False, name=None):
+                    writer.writerow(row)
+
+                rows_processed += len(chunk)
+
+                if progress_callback and total_rows > 0:
+                    pct = min(0.99, rows_processed / total_rows)
+                    progress_callback(pct, f"Procesando... {rows_processed:,} / ~{total_rows:,} filas")
+
+    finally:
+        if chunk_iter is not None:
+            chunk_iter.close()
+
+    if progress_callback:
+        progress_callback(1.0, "Completado")
+
+    return {
+        "output_file": str(output_file),
+        "total_rows": rows_processed,
+        "column_added": column_name,
     }

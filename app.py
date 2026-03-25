@@ -26,6 +26,7 @@ from processor import (
     sanitize_filename,
     process_csv,
     search_value_in_csv,
+    add_column_to_csv,
 )
 
 PREVIEW_ROWS = 200
@@ -301,7 +302,7 @@ class CSVProcessorApp(ctk.CTk):
         self.split_note.grid(row=4, column=0, sticky="w", padx=10, pady=(0, 8))
 
     def _build_right_tabs(self, parent):
-        """Crea el tabview con las pestañas Exportar CSV, Exportar TXT, Exportar JSON y Buscar."""
+        """Crea el tabview con las pestañas Exportar CSV, Exportar TXT, Exportar JSON, Buscar y Agregar Columna."""
         self.tabview = ctk.CTkTabview(parent)
         self.tabview.grid(row=0, column=1, sticky="nsew")
 
@@ -309,6 +310,7 @@ class CSVProcessorApp(ctk.CTk):
         self.tabview.add("   Exportar TXT   ")
         self.tabview.add("   Exportar JSON   ")
         self.tabview.add("   Buscar   ")
+        self.tabview.add("   Agregar Columna   ")
         # self.tabview.add("Filtros")       # TODO: descomentar para reactivar
         # self.tabview.add("Transformar")   # TODO: descomentar para reactivar
 
@@ -333,6 +335,7 @@ class CSVProcessorApp(ctk.CTk):
         self._build_export_txt_tab(self.tabview.tab("   Exportar TXT   "))
         self._build_export_json_tab(self.tabview.tab("   Exportar JSON   "))
         self._build_search_tab(self.tabview.tab("   Buscar   "))
+        self._build_add_column_tab(self.tabview.tab("   Agregar Columna   "))
         # self._build_filter_tab(self.tabview.tab("Filtros"))
         # self._build_transform_tab(self.tabview.tab("Transformar"))
 
@@ -340,7 +343,7 @@ class CSVProcessorApp(ctk.CTk):
 
     # Tabs que NO usan la top bar (Abrir CSV) ni la bottom bar (PROCESAR)
     _TABS_NO_TOP    = {"Buscar"}
-    _TABS_NO_BOTTOM = {"Buscar", "Exportar TXT", "Exportar JSON"}
+    _TABS_NO_BOTTOM = {"Buscar", "Exportar TXT", "Exportar JSON", "Agregar Columna"}
 
     def _on_tab_change(self, value: str):
         """Controla la visibilidad de paneles y barras según el tab activo:
@@ -751,6 +754,7 @@ class CSVProcessorApp(ctk.CTk):
         self._refresh_preview_table()
         self._refresh_txt_col_menu()
         self._refresh_json_col_menu()
+        self._update_add_col_columns()
         # self._refresh_filter_col_menu()      # TODO: descomentar al reactivar Filtros
         # self._refresh_transform_col_menu()   # TODO: descomentar al reactivar Transformar
         # self._refresh_transform_list()       # TODO: descomentar al reactivar Transformar
@@ -2407,10 +2411,18 @@ class CSVProcessorApp(ctk.CTk):
         """Agrupa los resultados y escribe un CSV por archivo con las columnas PRESET."""
         _export_success = False
         try:
+            # Determinar qué columna usar para carpetas: priorizar PHONEMODEL_NAME
+            actual_folder_col = folder_col
+            if self.search_results:
+                # Verificar si PHONEMODEL_NAME existe en los datos
+                has_phonemodel = any("PHONEMODEL_NAME" in rec for rec in self.search_results)
+                if has_phonemodel:
+                    actual_folder_col = "PHONEMODEL_NAME"
+
             # Agrupar en memoria
             grouped: dict[str, dict[str, list[dict]]] = {}
             for rec in self.search_results:
-                fv  = str(rec.get(folder_col, "")).strip() or "_sin_carpeta"
+                fv  = str(rec.get(actual_folder_col, "")).strip() or "_sin_carpeta"
                 fiv = str(rec.get(file_col,   "")).strip() or "_sin_archivo"
                 grouped.setdefault(fv, {}).setdefault(fiv, []).append(rec)
 
@@ -2586,6 +2598,248 @@ class CSVProcessorApp(ctk.CTk):
         self.after(0, lambda: self.json_progress_bar.set(1.0))
         self.after(0, lambda: self.json_pct_label.configure(text="100%"))
         self.after(0, lambda m=msg, c=color: self.json_status_label.configure(text=m, text_color=c))
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Agregar Columna — tab y lógica
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def _build_add_column_tab(self, parent):
+        """Tab para agregar una nueva columna con valor constante a un CSV."""
+        parent.grid_columnconfigure(0, weight=1)
+        parent.grid_rowconfigure(1, weight=1)   # fila espaciadora
+
+        # ── Panel de configuración ────────────────────────────────────────────
+        cfg = ctk.CTkFrame(parent)
+        cfg.grid(row=0, column=0, sticky="ew", padx=6, pady=(6, 4))
+        cfg.grid_columnconfigure(1, weight=1)
+
+        # Nombre de la nueva columna
+        ctk.CTkLabel(cfg, text="Nombre de columna:", width=140, anchor="e").grid(
+            row=0, column=0, padx=(10, 4), pady=8
+        )
+        self.add_col_name_var = tk.StringVar(value="")
+        self.add_col_name_entry = ctk.CTkEntry(
+            cfg, textvariable=self.add_col_name_var, placeholder_text="Ej: HONEMODEL_NAME"
+        )
+        self.add_col_name_entry.grid(row=0, column=1, sticky="ew", padx=(0, 10), pady=8)
+
+        # Valor constante
+        ctk.CTkLabel(cfg, text="Valor constante:", width=140, anchor="e").grid(
+            row=1, column=0, padx=(10, 4), pady=(0, 8)
+        )
+        self.add_col_value_var = tk.StringVar(value="")
+        self.add_col_value_entry = ctk.CTkEntry(
+            cfg, textvariable=self.add_col_value_var, placeholder_text="Ej: MODELO_DEFAULT"
+        )
+        self.add_col_value_entry.grid(row=1, column=1, sticky="ew", padx=(0, 10), pady=(0, 8))
+
+        # Separador
+        ctk.CTkFrame(cfg, height=2, fg_color="gray40").grid(
+            row=2, column=0, columnspan=2, sticky="ew", padx=10, pady=(0, 8)
+        )
+
+        # Posición de la columna
+        ctk.CTkLabel(cfg, text="Posición:", width=140, anchor="e").grid(
+            row=3, column=0, padx=(10, 4), pady=(0, 4)
+        )
+        self.add_col_position_var = tk.StringVar(value="end")
+        pos_frame = ctk.CTkFrame(cfg, fg_color="transparent")
+        pos_frame.grid(row=3, column=1, sticky="w", padx=(0, 10), pady=(0, 4))
+
+        ctk.CTkRadioButton(
+            pos_frame, text="Al inicio",
+            variable=self.add_col_position_var, value="start",
+            command=self._on_add_col_position_change,
+        ).pack(anchor="w", pady=(0, 4))
+        ctk.CTkRadioButton(
+            pos_frame, text="Al final",
+            variable=self.add_col_position_var, value="end",
+            command=self._on_add_col_position_change,
+        ).pack(anchor="w", pady=(0, 4))
+
+        after_frame = ctk.CTkFrame(pos_frame, fg_color="transparent")
+        after_frame.pack(anchor="w")
+        ctk.CTkRadioButton(
+            after_frame, text="Después de:",
+            variable=self.add_col_position_var, value="after",
+            command=self._on_add_col_position_change,
+        ).pack(side="left", padx=(0, 8))
+        self.add_col_after_var = tk.StringVar(value="(sin columnas)")
+        self.add_col_after_menu = ctk.CTkOptionMenu(
+            after_frame,
+            variable=self.add_col_after_var,
+            values=["(sin columnas)"],
+            width=200,
+            state="disabled",
+        )
+        self.add_col_after_menu.pack(side="left")
+
+        # ── Ruta de destino ───────────────────────────────────────────────────
+        dest_frame = ctk.CTkFrame(parent, fg_color=("#dbe8f5", "#1a3a5c"), corner_radius=8)
+        dest_frame.grid(row=2, column=0, sticky="ew", padx=8, pady=(6, 4))
+        dest_frame.grid_columnconfigure(0, weight=1)
+
+        ctk.CTkLabel(
+            dest_frame, text="📁  Destino:",
+            font=("Segoe UI", 13, "bold"),
+            anchor="w",
+        ).grid(row=0, column=0, sticky="w", padx=12, pady=(8, 0))
+
+        self.add_col_dest_label = ctk.CTkLabel(
+            dest_frame,
+            text="<carpeta del CSV> / CSV_con_columna_agregada / <nombre_archivo>.csv",
+            font=("Segoe UI", 13),
+            anchor="w",
+            wraplength=520,
+            justify="left",
+        )
+        self.add_col_dest_label.grid(row=1, column=0, sticky="w", padx=12, pady=(2, 10))
+
+        # Botón "Abrir carpeta"
+        self.add_col_open_btn = ctk.CTkButton(
+            dest_frame,
+            text="📂  Abrir carpeta",
+            command=self._open_add_col_folder,
+            width=150, height=32,
+            font=("Segoe UI", 11, "bold"),
+            fg_color=("gray75", "gray30"),
+            hover_color=("gray65", "gray40"),
+            text_color=("gray10", "gray90"),
+            state="disabled",
+        )
+        self.add_col_open_btn.grid(row=1, column=1, padx=(4, 12), pady=(2, 10), sticky="e")
+
+        # ── Botones procesar/cancelar + barra de progreso ─────────────────────
+        btns_frame = ctk.CTkFrame(parent, fg_color="transparent")
+        btns_frame.grid(row=3, column=0, padx=12, pady=(6, 4), sticky="w")
+        ctk.CTkButton(
+            btns_frame,
+            text="➕  Agregar Columna",
+            command=self.add_column_start,
+            height=38,
+            font=("Segoe UI", 12, "bold"),
+            fg_color="#2d7d46", hover_color="#1f5c32",
+        ).pack(side="left")
+
+        # Barra de progreso
+        prog_frame = ctk.CTkFrame(parent, fg_color="transparent")
+        prog_frame.grid(row=4, column=0, sticky="ew", padx=12, pady=(0, 2))
+        prog_frame.grid_columnconfigure(0, weight=1)
+        self.add_col_progress_bar = ctk.CTkProgressBar(prog_frame, height=20)
+        self.add_col_progress_bar.grid(row=0, column=0, sticky="ew", padx=(0, 8))
+        self.add_col_progress_bar.set(0)
+        self.add_col_pct_label = ctk.CTkLabel(
+            prog_frame, text="0%",
+            font=("Segoe UI", 11, "bold"),
+            width=50,
+        )
+        self.add_col_pct_label.grid(row=0, column=1)
+
+        # Etiqueta de estado
+        self.add_col_status_label = ctk.CTkLabel(
+            parent, text="Listo para procesar.",
+            font=("Segoe UI", 11),
+            anchor="w",
+        )
+        self.add_col_status_label.grid(row=5, column=0, sticky="w", padx=12, pady=(2, 10))
+
+        # Variable para la carpeta de salida
+        self._add_col_last_dir = None
+
+    def _on_add_col_position_change(self):
+        """Habilita/deshabilita el selector de columna según la posición elegida."""
+        if self.add_col_position_var.get() == "after":
+            self.add_col_after_menu.configure(state="normal")
+        else:
+            self.add_col_after_menu.configure(state="disabled")
+
+    def _update_add_col_columns(self):
+        """Actualiza el dropdown de columnas disponibles para 'después de'."""
+        if not self.columns:
+            values = ["(sin columnas)"]
+        else:
+            values = list(self.columns)
+        self.add_col_after_menu.configure(values=values)
+        if values and values[0] != "(sin columnas)":
+            self.add_col_after_var.set(values[0])
+        else:
+            self.add_col_after_var.set("(sin columnas)")
+
+    def _open_add_col_folder(self):
+        """Abre la carpeta donde se guardó el CSV con la columna agregada."""
+        if self._add_col_last_dir and self._add_col_last_dir.exists():
+            os.startfile(str(self._add_col_last_dir))
+
+    def add_column_start(self):
+        """Valida y lanza el procesamiento para agregar columna."""
+        if not self.filepath.get():
+            messagebox.showwarning("Sin archivo", "Cargá un archivo CSV primero.")
+            return
+
+        col_name = self.add_col_name_var.get().strip().upper()
+        if not col_name:
+            messagebox.showwarning("Agregar Columna", "Ingresá el nombre de la columna a agregar.")
+            return
+
+        col_value = self.add_col_value_var.get().strip().upper()
+        if not col_value:
+            messagebox.showwarning("Agregar Columna", "Ingresá el valor constante para la columna.")
+            return
+
+        position = self.add_col_position_var.get()
+        after_col = None
+        if position == "after":
+            after_col = self.add_col_after_var.get()
+            if not after_col or after_col == "(sin columnas)":
+                messagebox.showwarning("Agregar Columna", "Seleccioná la columna después de la cual insertar.")
+                return
+
+        self.add_col_status_label.configure(text="⏳ Procesando...", text_color="orange")
+        self.add_col_progress_bar.set(0)
+        self.add_col_pct_label.configure(text="0%")
+
+        threading.Thread(
+            target=self._add_column_thread,
+            args=(col_name, col_value, position, after_col),
+            daemon=True,
+        ).start()
+
+    def _add_column_thread(self, col_name: str, col_value: str, position: str, after_col: Optional[str]):
+        """Ejecuta add_column_to_csv en segundo plano."""
+        try:
+            def cb(pct, msg):
+                self.after(0, lambda p=pct: self.add_col_progress_bar.set(p))
+                pct_int = int(pct * 100)
+                self.after(0, lambda t=pct_int: self.add_col_pct_label.configure(text=f"{t}%"))
+
+            result = add_column_to_csv(
+                filepath=self.filepath.get(),
+                encoding=self.detected_encoding,
+                delimiter=self.detected_delimiter,
+                column_name=col_name,
+                column_value=col_value,
+                position=position,
+                after_column=after_col,
+                output_dir=None,
+                progress_callback=cb,
+            )
+
+            output_file = result["output_file"]
+            total_rows = result["total_rows"]
+            self._add_col_last_dir = Path(output_file).parent
+
+            msg = f"✓  Columna '{col_name}' agregada  |  {total_rows:,} filas  →  {output_file}"
+            color = ("green", "#4ec94e")
+
+            self.after(0, lambda: self.add_col_open_btn.configure(state="normal"))
+
+        except Exception as exc:
+            msg = f"Error: {exc}"
+            color = "red"
+
+        self.after(0, lambda: self.add_col_progress_bar.set(1.0))
+        self.after(0, lambda: self.add_col_pct_label.configure(text="100%"))
+        self.after(0, lambda m=msg, c=color: self.add_col_status_label.configure(text=m, text_color=c))
 
     # ─────────────────────────────────────────────────────────────────────────
     # Carpeta de salida
