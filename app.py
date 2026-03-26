@@ -8,6 +8,7 @@ import os
 import queue
 import threading
 import tkinter as tk
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date as _date, datetime as _datetime
 from tkinter import filedialog, messagebox, ttk
 from pathlib import Path
@@ -27,11 +28,12 @@ from processor import (
     sanitize_filename,
     process_csv,
     search_value_in_csv,
+    search_values_in_csv,
     add_column_to_csv,
 )
 
 PREVIEW_ROWS = 200
-APP_VERSION  = "1.1"
+APP_VERSION  = "2.0"
 HEADER_H     = 24                    # altura del canvas de encabezado en px
 CENTERED_COLUMNS = {"CLASSCODE"}     # columnas cuyo contenido se centra en la preview
 
@@ -142,6 +144,7 @@ class CSVProcessorApp(ctk.CTk):
         self.search_results:    list[dict]             = []      # resultados de la última búsqueda
         self.search_rename_map: dict[str, str]         = {}      # {col_real → nombre_preset} búsqueda
         self._search_json_last_dir: "Path | None"      = None    # última carpeta JSON exportada (buscar)
+        self._file_metadata_cache: dict[str, tuple[str, str]] = {}  # {filepath: (encoding, delimiter)}
 
         self._setup_treeview_style()
         self._build_ui()
@@ -2112,43 +2115,63 @@ class CSVProcessorApp(ctk.CTk):
         return None
 
     def _search_thread(self, values: list[str], search_col: str):
-        """Busca cada valor de `values` en `search_col` en todos los archivos cargados."""
-        total       = len(self.search_files) * len(values)
-        step        = 0
+        """
+        Busca todos los `values` en `search_col` en todos los archivos cargados.
+        OPTIMIZADO: Búsqueda por lotes + procesamiento paralelo.
+        """
+        total_files = len(self.search_files)
         all_results: list[dict] = []
+        files_processed = 0
 
-        for filepath in self.search_files:
+        def search_file(filepath: str) -> list[dict]:
+            """Busca todos los valores en un archivo (una sola pasada)."""
             if self._search_cancel:
-                break
+                return []
             try:
-                enc   = detect_encoding(filepath)
-                delim = detect_delimiter(filepath, enc)
+                # OPTIMIZACIÓN: usar cache de encoding/delimiter
+                if filepath in self._file_metadata_cache:
+                    enc, delim = self._file_metadata_cache[filepath]
+                else:
+                    enc   = detect_encoding(filepath)
+                    delim = detect_delimiter(filepath, enc)
+                    self._file_metadata_cache[filepath] = (enc, delim)
 
                 file_cols  = set(get_columns(filepath, enc, delim))
                 actual_col = self._resolve_search_col(search_col, file_cols)
-                if actual_col is None:
-                    step += len(values)
-                    continue  # este archivo no tiene la columna buscada
 
-                for value in values:
-                    if self._search_cancel:
-                        break
-                    rows = search_value_in_csv(
-                        filepath      = filepath,
-                        encoding      = enc,
-                        delimiter     = delim,
-                        search_column = actual_col,
-                        search_value  = value,
-                        cancel_fn     = lambda: self._search_cancel,
-                    )
-                    all_results.extend(rows)
-                    step   += 1
-                    pct     = step / total
-                    pct_int = int(pct * 100)
-                    self.after(0, lambda p=pct: self.search_progress_bar.set(p))
-                    self.after(0, lambda t=pct_int: self.search_pct_label.configure(text=f"{t}%"))
+                if actual_col is None:
+                    return []  # archivo no tiene la columna buscada
+
+                # OPTIMIZACIÓN: buscar TODOS los valores en una sola pasada
+                rows = search_values_in_csv(
+                    filepath        = filepath,
+                    encoding        = enc,
+                    delimiter       = delim,
+                    search_column   = actual_col,
+                    search_values   = values,
+                    cancel_fn       = lambda: self._search_cancel,
+                )
+                return rows
             except Exception:
-                step += len(values)   # saltar silenciosamente
+                return []  # saltar silenciosamente
+
+        # OPTIMIZACIÓN: procesar archivos en paralelo (máx 4 threads)
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            # Enviar todos los archivos a procesar
+            future_to_file = {executor.submit(search_file, fp): fp for fp in self.search_files}
+
+            # Procesar resultados a medida que completan
+            for future in as_completed(future_to_file):
+                if self._search_cancel:
+                    break
+                results = future.result()
+                all_results.extend(results)
+
+                files_processed += 1
+                pct = files_processed / total_files
+                pct_int = int(pct * 100)
+                self.after(0, lambda p=pct: self.search_progress_bar.set(p))
+                self.after(0, lambda t=pct_int: self.search_pct_label.configure(text=f"{t}%"))
 
         # ── Aplicar mapeo de columnas: renombrar claves reales al nombre preset ──
         if self.search_rename_map:

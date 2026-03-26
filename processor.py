@@ -337,9 +337,54 @@ def search_value_in_csv(
     Si `cancel_fn` es provisto y devuelve True, la búsqueda se interrumpe al final
     del chunk actual y retorna los resultados parciales hasta ese momento.
     """
+    # Delegar a la versión optimizada que busca múltiples valores
+    return search_values_in_csv(
+        filepath=filepath,
+        encoding=encoding,
+        delimiter=delimiter,
+        search_column=search_column,
+        search_values=[search_value],
+        columns_to_read=columns_to_read,
+        cancel_fn=cancel_fn,
+    )
+
+
+def search_values_in_csv(
+    filepath:        str,
+    encoding:        str,
+    delimiter:       str,
+    search_column:   str,
+    search_values:   list[str],
+    columns_to_read: Optional[list[str]] = None,
+    cancel_fn:       Optional[Callable[[], bool]] = None,
+) -> list[dict]:
+    """
+    Busca MÚLTIPLES valores (exacta, case-insensitive) en `search_column`.
+    OPTIMIZADO: Lee el archivo UNA SOLA VEZ para todos los valores.
+
+    Parámetros
+    ----------
+    filepath        : ruta al CSV
+    encoding        : codificación del archivo
+    delimiter       : delimitador del CSV
+    search_column   : columna donde buscar
+    search_values   : lista de valores a buscar
+    columns_to_read : columnas a incluir en resultados (None = todas)
+    cancel_fn       : función que retorna True para cancelar
+
+    Retorna
+    -------
+    Lista de dicts con:
+      '_file'  → nombre del archivo (basename)
+      '_row'   → número de fila en el CSV (2-based)
+      + columnas del registro
+    """
     results: list[dict] = []
     chunk_iter = None
-    sv = search_value.strip().lower()
+
+    # Crear set de valores en minúsculas para búsqueda rápida
+    search_set = {v.strip().lower() for v in search_values}
+
     try:
         chunk_iter = pd.read_csv(
             filepath,
@@ -351,24 +396,32 @@ def search_value_in_csv(
             engine="python",
         )
         basename = Path(filepath).name
+
         for chunk in chunk_iter:
             if cancel_fn and cancel_fn():
                 break
             chunk = chunk.fillna("")
             if search_column not in chunk.columns:
                 continue
-            mask    = chunk[search_column].str.strip().str.lower() == sv
+
+            # Buscar todos los valores en una sola pasada usando isin()
+            chunk_lower = chunk[search_column].str.strip().str.lower()
+            mask = chunk_lower.isin(search_set)
             matched = chunk[mask]
+
             if columns_to_read:
-                avail   = [c for c in columns_to_read if c in matched.columns]
+                avail = [c for c in columns_to_read if c in matched.columns]
                 matched = matched[avail]
+
             for orig_idx, row in matched.iterrows():
-                rec = {"_file": basename, "_row": orig_idx + 2}   # +2: encabezado en fila 1
+                rec = {"_file": basename, "_row": orig_idx + 2}
                 rec.update(row.to_dict())
                 results.append(rec)
+
     finally:
         if chunk_iter is not None:
             chunk_iter.close()
+
     return results
 
 
