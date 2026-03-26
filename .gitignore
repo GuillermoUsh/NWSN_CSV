@@ -5,11 +5,22 @@ __pycache__/
 
 # PyInstaller build artifacts
 build_tmp/
+build/
+dist/
 *.spec
 
 # Carpetas de salida generadas
 Salida/
 setup/
+ForModelsCSV/
+Export_TXT/
+Export_JSON/
+Export_CSV/
+Search_Export_CSV/
+CSV_con_columna_agregada/
+
+# Archivos CSV de prueba
+*.csv
 
 # Claude internal
 .claude/
