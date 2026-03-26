@@ -2822,6 +2822,7 @@ class CSVProcessorApp(ctk.CTk):
                 position=position,
                 after_column=after_col,
                 output_dir=None,
+                column_order=PRESET_COLUMNS,
                 progress_callback=cb,
             )
 
@@ -2914,6 +2915,7 @@ class CSVProcessorApp(ctk.CTk):
                 out_delimiter    = out_delimiter,
                 rename_map       = rename_map,
                 date_transforms  = date_transforms,
+                column_order     = PRESET_COLUMNS,
                 progress_callback= cb,
             )
             self.progress_queue.put(("done", result))

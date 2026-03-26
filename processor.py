@@ -423,6 +423,7 @@ def process_csv(
     out_delimiter:     str,
     rename_map:        Optional[dict[str, str]] = None,
     date_transforms:   Optional[dict[str, str]] = None,
+    column_order:      Optional[list[str]] = None,
     progress_callback: Optional[Callable[[float, str], None]] = None,
 ) -> dict:
     """
@@ -440,6 +441,7 @@ def process_csv(
     out_delimiter     : delimitador de salida (',', ';', '\\t')
     rename_map        : {col_real: nombre_preset} para renombrar encabezados en la salida
     date_transforms   : {col: base_date} para normalizar columnas de fecha/hora
+    column_order      : orden deseado de columnas (usando nombres finales después de rename_map)
     progress_callback : función (0.0–1.0, mensaje) para actualizar la barra de progreso
     """
 
@@ -552,6 +554,28 @@ def process_csv(
                         rename_map[c] if rename_map and c in rename_map else c
                         for c in header_to_write
                     ]
+
+                    # Reordenar columnas según column_order si está especificado
+                    if column_order:
+                        # Crear mapeo de nombre final -> nombre original
+                        final_to_original = {
+                            (rename_map[c] if rename_map and c in rename_map else c): c
+                            for c in header_to_write
+                        }
+                        # Reordenar: primero las que están en column_order, luego el resto
+                        ordered_finals = []
+                        for col in column_order:
+                            if col in final_to_original:
+                                ordered_finals.append(col)
+                        # Agregar columnas que no están en column_order al final
+                        for col in header_output:
+                            if col not in ordered_finals:
+                                ordered_finals.append(col)
+
+                        # Reordenar header_to_write según el nuevo orden
+                        header_to_write = [final_to_original[col] for col in ordered_finals]
+                        header_output = ordered_finals
+
                     writer.writerow(header_output)
 
                     file_handles[out_file] = fh
@@ -599,6 +623,7 @@ def add_column_to_csv(
     position:          str = "end",
     after_column:      Optional[str] = None,
     output_dir:        Optional[str] = None,
+    column_order:      Optional[list[str]] = None,
     progress_callback: Optional[Callable[[float, str], None]] = None,
 ) -> dict:
     """
@@ -615,6 +640,7 @@ def add_column_to_csv(
     position          : "start" (inicio), "end" (final), o "after" (después de after_column)
     after_column      : nombre de la columna después de la cual insertar (solo si position="after")
     output_dir        : carpeta de salida (si None, usa la carpeta del archivo original)
+    column_order      : orden deseado de columnas en la salida
     progress_callback : función (0.0–1.0, mensaje) para actualizar progreso
     """
 
@@ -653,6 +679,19 @@ def add_column_to_csv(
 
     # Crear nuevo encabezado con la columna insertada
     new_header = original_header[:insert_idx] + [column_name] + original_header[insert_idx:]
+
+    # Reordenar columnas según column_order si está especificado
+    if column_order:
+        ordered_header = []
+        # Primero agregar columnas que están en column_order (en ese orden)
+        for col in column_order:
+            if col in new_header:
+                ordered_header.append(col)
+        # Luego agregar columnas que no están en column_order
+        for col in new_header:
+            if col not in ordered_header:
+                ordered_header.append(col)
+        new_header = ordered_header
 
     # Contar filas para progreso
     if progress_callback:
