@@ -11,6 +11,7 @@ import tkinter as tk
 from datetime import date as _date, datetime as _datetime
 from tkinter import filedialog, messagebox, ttk
 from pathlib import Path
+from typing import Optional
 
 import customtkinter as ctk
 
