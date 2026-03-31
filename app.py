@@ -145,6 +145,15 @@ class CSVProcessorApp(ctk.CTk):
         self.search_rename_map: dict[str, str]         = {}      # {col_real → nombre_preset} búsqueda
         self._search_json_last_dir: "Path | None"      = None    # última carpeta JSON exportada (buscar)
         self._file_metadata_cache: dict[str, tuple[str, str]] = {}  # {filepath: (encoding, delimiter)}
+        # ── Estado para copiar celdas individuales ─────────────────────────────
+        self._last_clicked_column: dict[ttk.Treeview, int] = {}  # {tree: col_index}
+        self.preview_copy_label: "ctk.CTkLabel | None"    = None  # label indicador en preview
+        self.search_copy_label:  "ctk.CTkLabel | None"    = None  # label indicador en búsqueda
+        # ── Estado para redimensionar columnas en canvas header ────────────────
+        self._resize_col_index: "int | None"     = None  # índice de columna siendo redimensionada
+        self._resize_start_x:   int              = 0     # posición X inicial del mouse
+        self._resize_start_width: int            = 0     # ancho inicial de la columna
+        self._hover_col_index:  "int | None"     = None  # índice de columna con hover
 
         self._setup_treeview_style()
         self._build_ui()
@@ -186,6 +195,11 @@ class CSVProcessorApp(ctk.CTk):
             foreground="white",
             font=("Segoe UI", 9, "bold"),
             relief="flat",
+        )
+        style.map(
+            "Treeview.Heading",
+            background=[("active", "#2c5aa0")],  # Azul más claro al pasar el mouse
+            foreground=[("active", "white")],    # Texto blanco siempre visible
         )
         style.map(
             "Treeview",
@@ -315,6 +329,7 @@ class CSVProcessorApp(ctk.CTk):
         self.tabview.add("   Exportar JSON   ")
         self.tabview.add("   Buscar   ")
         self.tabview.add("   Agregar Columna   ")
+        self.tabview.add("   Part Name   ")
         # self.tabview.add("Filtros")       # TODO: descomentar para reactivar
         # self.tabview.add("Transformar")   # TODO: descomentar para reactivar
 
@@ -340,6 +355,7 @@ class CSVProcessorApp(ctk.CTk):
         self._build_export_json_tab(self.tabview.tab("   Exportar JSON   "))
         self._build_search_tab(self.tabview.tab("   Buscar   "))
         self._build_add_column_tab(self.tabview.tab("   Agregar Columna   "))
+        self._build_part_name_tab(self.tabview.tab("   Part Name   "))
         # self._build_filter_tab(self.tabview.tab("Filtros"))
         # self._build_transform_tab(self.tabview.tab("Transformar"))
 
@@ -503,8 +519,15 @@ class CSVProcessorApp(ctk.CTk):
         )
         self._header_canvas.grid(row=0, column=0, sticky="ew")
 
+        # Bindings para redimensionar columnas arrastrando en el canvas header
+        self._header_canvas.bind("<Motion>", self._on_header_motion)
+        self._header_canvas.bind("<Button-1>", self._on_header_click)
+        self._header_canvas.bind("<B1-Motion>", self._on_header_drag)
+        self._header_canvas.bind("<ButtonRelease-1>", self._on_header_release)
+        self._header_canvas.bind("<Leave>", self._on_header_leave)
+
         # Treeview sin header nativo (show="") — fila 1
-        self.tree = ttk.Treeview(tree_frame, show="", selectmode="none")
+        self.tree = ttk.Treeview(tree_frame, show="", selectmode="browse")
         vsb = ttk.Scrollbar(tree_frame, orient="vertical",   command=self.tree.yview)
         self._hsb = ttk.Scrollbar(tree_frame, orient="horizontal", command=self._on_hsb_move)
         self.tree.configure(yscrollcommand=vsb.set, xscrollcommand=self._on_tree_xscroll)
@@ -513,8 +536,22 @@ class CSVProcessorApp(ctk.CTk):
         vsb.grid(row=0, column=1, rowspan=2, sticky="ns")
         self._hsb.grid(row=2, column=0, sticky="ew")
 
-        # Reajustar anchos de columna al redimensionar la ventana
-        self.tree.bind("<Configure>", lambda e: self._auto_fit_columns())
+        # Rastrear columna clickeada para copiar solo esa celda
+        self.tree.bind("<Button-1>", lambda e: self._on_tree_click(e, self.tree))
+        # Permitir copiar valores con Ctrl+C
+        self.tree.bind("<Control-c>", lambda e: self._copy_tree_selection(self.tree))
+
+        # Label indicador de qué celda se copiará con Ctrl+C
+        self.preview_copy_label = ctk.CTkLabel(
+            tree_frame,
+            text="",
+            font=("Segoe UI", 13, "bold"),
+            text_color="gray60",
+            fg_color=("#f1f5f9", "#1e293b"),
+            corner_radius=6,
+            anchor="w",
+        )
+        self.preview_copy_label.grid(row=3, column=0, sticky="ew", padx=8, pady=(2, 4))
 
     # ── Tab: Filtros ─────────────────────────────────────────────────────────
 
@@ -759,6 +796,7 @@ class CSVProcessorApp(ctk.CTk):
         self._refresh_txt_col_menu()
         self._refresh_json_col_menu()
         self._update_add_col_columns()
+        self._update_part_name_classcode()
         # self._refresh_filter_col_menu()      # TODO: descomentar al reactivar Filtros
         # self._refresh_transform_col_menu()   # TODO: descomentar al reactivar Transformar
         # self._refresh_transform_list()       # TODO: descomentar al reactivar Transformar
@@ -951,6 +989,8 @@ class CSVProcessorApp(ctk.CTk):
             self.tree.configure(columns=[])
             self.tree.delete(*self.tree.get_children())
             self.preview_label.configure(text="Sin columnas seleccionadas.", text_color="orange")
+            if self.preview_copy_label:
+                self.preview_copy_label.configure(text="")
             return
 
         df = self.df_preview[selected]
@@ -958,17 +998,28 @@ class CSVProcessorApp(ctk.CTk):
         self.tree.configure(columns=selected)
         for col in selected:
             preset_name = self.column_rename_map.get(col)
-            # Ancho mínimo basado en la longitud del texto del encabezado
-            label_len = len(col) + (len(f"  →  {preset_name}") if preset_name else 0)
-            min_w  = max(60, label_len * 8 + 16)
-            anchor = "center" if col in CENTERED_COLUMNS or preset_name in CENTERED_COLUMNS else "w"
-            self.tree.column(col, width=min_w, minwidth=min_w, stretch=True, anchor=anchor)
 
-        # Distribuir el espacio disponible tras el render inicial
-        self.tree.after(30, self._auto_fit_columns)
+            # Calcular ancho basado en el contenido
+            # 1. Ancho del encabezado
+            label_len = len(col) + (len(f"  →  {preset_name}") if preset_name else 0)
+            header_width = label_len * 8 + 16
+
+            # 2. Ancho del contenido (máximo de las primeras 100 filas)
+            max_content_len = 0
+            for val in df[col].head(100):
+                max_content_len = max(max_content_len, len(str(val)))
+            content_width = max_content_len * 8 + 16
+
+            # Usar el mayor de los dos, con límites min/max
+            optimal_width = max(80, min(400, max(header_width, content_width)))
+
+            anchor = "center" if col in CENTERED_COLUMNS or preset_name in CENTERED_COLUMNS else "w"
+            self.tree.column(col, width=optimal_width, minwidth=60, stretch=True, anchor=anchor)
 
         # Cargar filas con colores alternados
         self.tree.delete(*self.tree.get_children())
+        if self.preview_copy_label:
+            self.preview_copy_label.configure(text="")
         c = self._tree_colors
         for i, (_, row) in enumerate(df.iterrows()):
             tag = "even" if i % 2 == 0 else "odd"
@@ -997,15 +1048,25 @@ class CSVProcessorApp(ctk.CTk):
 
         available  = total - 18  # reservar ~18 px para la scrollbar vertical
         n          = len(cols)
+
+        # Usar los anchos actuales (ya calculados basándose en contenido)
+        current_widths = [self.tree.column(c, "width") for c in cols]
+        total_current  = sum(current_widths)
         min_widths = [self.tree.column(c, "minwidth") for c in cols]
         total_min  = sum(min_widths)
 
-        if available >= total_min:
-            # Espacio suficiente: distribuir el sobrante proporcionalmente al mínimo
+        if total_current <= available:
+            # Si los anchos actuales caben, no hacer nada (ya están optimizados)
+            return
+        elif available >= total_min:
+            # Espacio disponible: distribuir proporcionalmente a los anchos calculados
             extra = available - total_min
-            for c, mw in zip(cols, min_widths):
-                share = int(extra * (mw / total_min)) if total_min > 0 else extra // n
-                self.tree.column(c, width=mw + share)
+            for c, cw, mw in zip(cols, current_widths, min_widths):
+                # Distribuir proporcionalmente al ancho calculado
+                proportion = cw / total_current if total_current > 0 else 1.0 / n
+                new_width = int(available * proportion)
+                new_width = max(mw, min(new_width, cw))  # No más del original, no menos del mínimo
+                self.tree.column(c, width=new_width)
         else:
             # Menos espacio del mínimo: repartir por igual con ancho mínimo garantizado
             per_col = max(60, available // n)
@@ -1013,6 +1074,80 @@ class CSVProcessorApp(ctk.CTk):
                 self.tree.column(c, width=per_col)
 
         self._redraw_header_canvas()
+
+    def _on_tree_click(self, event, tree: ttk.Treeview):
+        """Guarda el índice de la columna clickeada y actualiza el label indicador."""
+        region = tree.identify_region(event.x, event.y)
+        if region == "cell":
+            col = tree.identify_column(event.x)
+            if col:
+                # Extraer índice de columna (formato: '#1', '#2', etc.)
+                col_idx = int(col.replace('#', '')) - 1
+                self._last_clicked_column[tree] = col_idx
+
+                # Actualizar label indicador con el valor que se copiará
+                selection = tree.selection()
+                if selection:
+                    item = selection[0]
+                    values = tree.item(item, "values")
+                    if values and 0 <= col_idx < len(values):
+                        # Obtener nombre de la columna
+                        columns = tree["columns"]
+                        if isinstance(columns, tuple) and col_idx < len(columns):
+                            col_name = columns[col_idx]
+                        else:
+                            col_name = f"Columna {col_idx + 1}"
+
+                        cell_value = str(values[col_idx])
+                        # Truncar si es muy largo
+                        display_value = cell_value if len(cell_value) <= 50 else cell_value[:47] + "..."
+
+                        # Determinar cuál label actualizar
+                        if tree == self.tree and self.preview_copy_label:
+                            self.preview_copy_label.configure(
+                                text=f"📋 {col_name}: \"{display_value}\"",
+                                text_color=("#2563eb", "#60a5fa")
+                            )
+                        elif tree == self.search_tree and self.search_copy_label:
+                            self.search_copy_label.configure(
+                                text=f"📋 {col_name}: \"{display_value}\"",
+                                text_color=("#2563eb", "#60a5fa")
+                            )
+        else:
+            # Si no se clickeó en una celda, limpiar los labels
+            if tree == self.tree and self.preview_copy_label:
+                self.preview_copy_label.configure(text="", text_color="gray60")
+            elif tree == self.search_tree and self.search_copy_label:
+                self.search_copy_label.configure(text="", text_color="gray60")
+
+    def _copy_tree_selection(self, tree: ttk.Treeview):
+        """
+        Copia el valor de la celda clickeada al portapapeles.
+        Si no hay columna específica, copia toda la fila.
+        """
+        selection = tree.selection()
+        if not selection:
+            return
+
+        # Obtener el primer item seleccionado
+        item = selection[0]
+        values = tree.item(item, "values")
+
+        if not values:
+            return
+
+        # Si se clickeó una columna específica, copiar solo ese valor
+        if tree in self._last_clicked_column:
+            col_idx = self._last_clicked_column[tree]
+            if 0 <= col_idx < len(values):
+                self.clipboard_clear()
+                self.clipboard_append(str(values[col_idx]))
+                return
+
+        # Si no, copiar toda la fila (fallback)
+        row_text = '\t'.join(str(v) for v in values)
+        self.clipboard_clear()
+        self.clipboard_append(row_text)
 
     # ── Scroll sync ──────────────────────────────────────────────────────────
 
@@ -1045,16 +1180,18 @@ class CSVProcessorApp(ctk.CTk):
         x_off = -int(x_frac * total_col_w)
 
         bg          = self._tree_colors["header_bg"]
+        bg_hover    = "#2c5aa0"  # Azul más claro para hover
         x           = x_off
         font_normal = ("Segoe UI", 9, "bold")
 
-        for col in cols:
+        for i, col in enumerate(cols):
             cw          = self.tree.column(col, "width")
             preset_name = self.column_rename_map.get(col)
 
-            # Fondo de la celda de encabezado
+            # Fondo de la celda de encabezado (hover si el mouse está sobre esta columna)
+            cell_bg = bg_hover if i == self._hover_col_index else bg
             canvas.create_rectangle(x, 0, x + cw, HEADER_H,
-                                     fill=bg, outline="#1a3a6a", width=1)
+                                     fill=cell_bg, outline="#1a3a6a", width=1)
 
             if preset_name:
                 # Texto bicolor: "ORIGINAL  →  " en blanco + "PRESET" en dorado
@@ -1077,6 +1214,106 @@ class CSVProcessorApp(ctk.CTk):
         # Actualizar scrollregion para que el canvas refleje el ancho total
         canvas_w = max(total_col_w, canvas.winfo_width())
         canvas.configure(scrollregion=(0, 0, canvas_w, HEADER_H))
+
+    def _get_column_edges(self):
+        """Retorna lista de (col_index, x_derecha) para detectar bordes de columna."""
+        cols = self.tree["columns"]
+        if not cols:
+            return []
+
+        try:
+            x_frac = self.tree.xview()[0]
+        except Exception:
+            x_frac = 0
+        total_col_w = sum(self.tree.column(c, "width") for c in cols)
+        x_off = -int(x_frac * total_col_w)
+
+        edges = []
+        x = x_off
+        for i, col in enumerate(cols):
+            cw = self.tree.column(col, "width")
+            x += cw
+            edges.append((i, x))
+        return edges
+
+    def _on_header_motion(self, event):
+        """Cambia el cursor cuando está sobre un borde de columna y actualiza hover."""
+        edges = self._get_column_edges()
+
+        # Detectar si está sobre un borde (para redimensionar)
+        on_border = any(abs(event.x - x) < 4 for _, x in edges)
+        cursor = "sb_h_double_arrow" if on_border else ""
+        self._header_canvas.configure(cursor=cursor)
+
+        # Detectar sobre qué columna está el mouse (para hover)
+        if not on_border:
+            cols = self.tree["columns"]
+            if not cols:
+                return
+
+            try:
+                x_frac = self.tree.xview()[0]
+            except Exception:
+                x_frac = 0
+            total_col_w = sum(self.tree.column(c, "width") for c in cols)
+            x_off = -int(x_frac * total_col_w)
+
+            x = x_off
+            new_hover = None
+            for i, col in enumerate(cols):
+                cw = self.tree.column(col, "width")
+                if x <= event.x < x + cw:
+                    new_hover = i
+                    break
+                x += cw
+
+            # Solo redibujar si cambió la columna con hover
+            if new_hover != self._hover_col_index:
+                self._hover_col_index = new_hover
+                self._redraw_header_canvas()
+        else:
+            # Si está sobre un borde, quitar hover
+            if self._hover_col_index is not None:
+                self._hover_col_index = None
+                self._redraw_header_canvas()
+
+    def _on_header_click(self, event):
+        """Detecta si se clickeó un borde de columna para iniciar redimensionamiento."""
+        edges = self._get_column_edges()
+        for col_idx, x_right in edges:
+            if abs(event.x - x_right) < 4:
+                self._resize_col_index = col_idx
+                self._resize_start_x = event.x
+                cols = self.tree["columns"]
+                if col_idx < len(cols):
+                    self._resize_start_width = self.tree.column(cols[col_idx], "width")
+                return
+
+    def _on_header_drag(self, event):
+        """Redimensiona la columna mientras se arrastra."""
+        if self._resize_col_index is None:
+            return
+
+        cols = self.tree["columns"]
+        if self._resize_col_index >= len(cols):
+            return
+
+        delta = event.x - self._resize_start_x
+        new_width = max(60, self._resize_start_width + delta)  # mínimo 60px
+        self.tree.column(cols[self._resize_col_index], width=new_width)
+        self._redraw_header_canvas()
+
+    def _on_header_release(self, event):
+        """Finaliza el redimensionamiento."""
+        self._resize_col_index = None
+        self._resize_start_x = 0
+        self._resize_start_width = 0
+
+    def _on_header_leave(self, event):
+        """Limpia el hover cuando el mouse sale del canvas header."""
+        if self._hover_col_index is not None:
+            self._hover_col_index = None
+            self._redraw_header_canvas()
 
     # ─────────────────────────────────────────────────────────────────────────
     # Filtros
@@ -1834,6 +2071,22 @@ class CSVProcessorApp(ctk.CTk):
         self.search_tree.grid(row=0, column=0, sticky="nsew")
         vsb_s.grid(row=0, column=1, sticky="ns")
         hsb_s.grid(row=1, column=0, sticky="ew")
+        # Rastrear columna clickeada para copiar solo esa celda
+        self.search_tree.bind("<Button-1>", lambda e: self._on_tree_click(e, self.search_tree))
+        # Permitir copiar valores con Ctrl+C
+        self.search_tree.bind("<Control-c>", lambda e: self._copy_tree_selection(self.search_tree))
+
+        # Label indicador de qué celda se copiará con Ctrl+C
+        self.search_copy_label = ctk.CTkLabel(
+            results_frame,
+            text="",
+            font=("Segoe UI", 13, "bold"),
+            text_color="gray60",
+            fg_color=("#f1f5f9", "#1e293b"),
+            corner_radius=6,
+            anchor="w",
+        )
+        self.search_copy_label.grid(row=2, column=0, sticky="ew", padx=8, pady=(2, 4))
 
         # ── Fila de exportación JSON ───────────────────────────────────────────
         export_row = ctk.CTkFrame(parent, fg_color=("#dbe8f5", "#1a3a5c"), corner_radius=8)
@@ -2228,13 +2481,32 @@ class CSVProcessorApp(ctk.CTk):
         display_cols = ["Archivo", "Fila"] + preset_cols
         self.search_tree["columns"] = display_cols
 
+        # Calcular ancho automático para columnas fijas
         self.search_tree.heading("Archivo", text="Archivo", anchor="w")
-        self.search_tree.column("Archivo", width=200, minwidth=120, anchor="w")
+        max_file_len = max((len(r.get("_file", "")) for r in results), default=10)
+        file_width = max(120, min(300, max_file_len * 8 + 16))
+        self.search_tree.column("Archivo", width=file_width, minwidth=100, stretch=True, anchor="w")
+
         self.search_tree.heading("Fila", text="Fila", anchor="center")
-        self.search_tree.column("Fila", width=60, minwidth=50, anchor="center")
+        self.search_tree.column("Fila", width=60, minwidth=50, stretch=True, anchor="center")
+
+        # Calcular ancho automático para cada columna de datos
         for col in preset_cols:
             self.search_tree.heading(col, text=col, anchor="w")
-            self.search_tree.column(col, width=150, minwidth=70, anchor="w")
+
+            # Ancho del encabezado
+            header_width = len(col) * 8 + 16
+
+            # Ancho del contenido (máximo de los primeros 100 registros)
+            max_content_len = len(col)
+            for rec in results[:100]:
+                val = rec.get(col, "")
+                max_content_len = max(max_content_len, len(str(val)))
+            content_width = max_content_len * 8 + 16
+
+            # Usar el mayor, con límites
+            optimal_width = max(80, min(400, max(header_width, content_width)))
+            self.search_tree.column(col, width=optimal_width, minwidth=60, stretch=True, anchor="w")
 
         # Limpiar y poblar filas
         for item in self.search_tree.get_children():
@@ -2279,6 +2551,9 @@ class CSVProcessorApp(ctk.CTk):
         # Vaciar treeview
         for item in self.search_tree.get_children():
             self.search_tree.delete(item)
+        # Limpiar label indicador de copia
+        if self.search_copy_label:
+            self.search_copy_label.configure(text="")
         # Resetear dropdowns de exportación
         self._refresh_search_json_col_menus([])
         # Deshabilitar botón abrir carpeta
@@ -3013,6 +3288,402 @@ class CSVProcessorApp(ctk.CTk):
         # Si aún está procesando, volver a verificar en 120 ms
         if self.processing:
             self.after(120, self._poll_queue)
+
+    # ── Tab: Part Name ───────────────────────────────────────────────────────
+
+    def _build_part_name_tab(self, parent):
+        """Tab para analizar patrones de KEYUNITBARCODE y agrupar KEYMATERIAL por CLASSCODE."""
+        parent.grid_columnconfigure(0, weight=1)
+        parent.grid_rowconfigure(3, weight=1)
+
+        # ── Selector de CLASSCODE ─────────────────────────────────────────────
+        selector_frame = ctk.CTkFrame(parent)
+        selector_frame.grid(row=0, column=0, sticky="ew", padx=6, pady=(6, 4))
+        selector_frame.grid_columnconfigure(1, weight=1)
+
+        ctk.CTkLabel(selector_frame, text="CLASSCODE:", width=120, anchor="e").grid(
+            row=0, column=0, padx=(10, 4), pady=8
+        )
+        self.part_name_classcode_var = tk.StringVar(value="(sin datos)")
+        self.part_name_classcode_menu = ctk.CTkOptionMenu(
+            selector_frame,
+            variable=self.part_name_classcode_var,
+            values=["(sin datos)"],
+            width=200,
+        )
+        self.part_name_classcode_menu.grid(row=0, column=1, sticky="w", padx=(0, 10), pady=8)
+
+        # Botón analizar
+        ctk.CTkButton(
+            selector_frame,
+            text="🔍  Analizar",
+            command=self._analyze_part_name,
+            width=150, height=36,
+            font=("Segoe UI", 12, "bold"),
+            fg_color="#2563eb", hover_color="#1d4ed8",
+        ).grid(row=0, column=2, padx=(4, 10), pady=8)
+
+        # ── RegEx generado ─────────────────────────────────────────────────────
+        regex_frame = ctk.CTkFrame(parent)
+        regex_frame.grid(row=1, column=0, sticky="nsew", padx=6, pady=(4, 4))
+        regex_frame.grid_columnconfigure(0, weight=1)
+        regex_frame.grid_rowconfigure(1, weight=1)
+
+        # Header con label y botón copiar
+        regex_header = ctk.CTkFrame(regex_frame, fg_color="transparent")
+        regex_header.grid(row=0, column=0, sticky="ew", padx=10, pady=(8, 4))
+        regex_header.grid_columnconfigure(0, weight=1)
+
+        ctk.CTkLabel(
+            regex_header, text="📝  RegEx para KEYUNITBARCODE:",
+            font=("Segoe UI", 12, "bold"), anchor="w"
+        ).grid(row=0, column=0, sticky="w")
+
+        ctk.CTkButton(
+            regex_header,
+            text="📋  Copiar RegEx",
+            command=self._copy_regex,
+            width=120, height=28,
+            font=("Segoe UI", 10, "bold"),
+            fg_color=("#3b82f6", "#2563eb"),
+            hover_color=("#2563eb", "#1d4ed8"),
+        ).grid(row=0, column=1, padx=(4, 0))
+
+        self.part_name_regex_text = ctk.CTkTextbox(
+            regex_frame,
+            font=("Consolas", 13),
+            wrap="word",
+            height=220,  # Aumentado a 220px para mejor visibilidad
+        )
+        self.part_name_regex_text.grid(row=1, column=0, sticky="nsew", padx=10, pady=(0, 8))
+        self.part_name_regex_text.insert("1.0", "Seleccioná un CLASSCODE y presioná 'Analizar'")
+        self.part_name_regex_text.configure(state="disabled")
+
+        # ── KEYMATERIAL agrupados ──────────────────────────────────────────────
+        material_frame = ctk.CTkFrame(parent)
+        material_frame.grid(row=2, column=0, sticky="nsew", padx=6, pady=(4, 4))
+        material_frame.grid_columnconfigure(0, weight=1)
+        material_frame.grid_rowconfigure(1, weight=1)
+
+        ctk.CTkLabel(
+            material_frame, text="📊  KEYMATERIAL (agrupados):",
+            font=("Segoe UI", 12, "bold"), anchor="w"
+        ).grid(row=0, column=0, sticky="w", padx=10, pady=(8, 4))
+
+        # Frame scrollable para los materiales
+        self.part_name_material_scroll = ctk.CTkScrollableFrame(
+            material_frame,
+            fg_color=("gray90", "gray20"),
+            height=200,
+        )
+        self.part_name_material_scroll.grid(row=1, column=0, sticky="nsew", padx=10, pady=(0, 8))
+        self.part_name_material_scroll.grid_columnconfigure(0, weight=1)
+
+        # ── Estadísticas ───────────────────────────────────────────────────────
+        stats_frame = ctk.CTkFrame(parent, fg_color=("#e0f2fe", "#1e3a5f"), corner_radius=8)
+        stats_frame.grid(row=3, column=0, sticky="ew", padx=8, pady=(4, 8))
+
+        self.part_name_stats_label = ctk.CTkLabel(
+            stats_frame,
+            text="Esperando análisis...",
+            font=("Segoe UI", 11),
+            anchor="w",
+        )
+        self.part_name_stats_label.grid(row=0, column=0, sticky="w", padx=12, pady=8)
+
+    def _analyze_part_name(self):
+        """Analiza el CLASSCODE seleccionado y genera RegEx + agrupación de KEYMATERIAL."""
+        if self.df_preview is None or self.df_preview.empty:
+            messagebox.showwarning("Part Name", "Cargá un archivo CSV primero.")
+            return
+
+        classcode = self.part_name_classcode_var.get()
+        if classcode == "(sin datos)" or not classcode:
+            messagebox.showwarning("Part Name", "Seleccioná un CLASSCODE válido.")
+            return
+
+        # Filtrar por CLASSCODE
+        if "CLASSCODE" not in self.df_preview.columns:
+            messagebox.showerror("Part Name", "El archivo no tiene la columna CLASSCODE.")
+            return
+
+        df_filtered = self.df_preview[self.df_preview["CLASSCODE"] == classcode]
+
+        if df_filtered.empty:
+            messagebox.showinfo("Part Name", f"No hay registros con CLASSCODE = {classcode}")
+            return
+
+        # Generar RegEx para KEYUNITBARCODE
+        if "KEYUNITBARCODE" in df_filtered.columns:
+            keyunitbarcodes = df_filtered["KEYUNITBARCODE"].dropna().unique().tolist()
+            regex_pattern = self._generate_regex_pattern(keyunitbarcodes)
+
+            self.part_name_regex_text.configure(state="normal")
+            self.part_name_regex_text.delete("1.0", "end")
+            self.part_name_regex_text.insert("1.0", regex_pattern)
+            self.part_name_regex_text.configure(state="disabled")
+        else:
+            regex_pattern = "(columna KEYUNITBARCODE no encontrada)"
+            self.part_name_regex_text.configure(state="normal")
+            self.part_name_regex_text.delete("1.0", "end")
+            self.part_name_regex_text.insert("1.0", regex_pattern)
+            self.part_name_regex_text.configure(state="disabled")
+
+        # Agrupar KEYMATERIAL
+        # Limpiar frame scrollable
+        for widget in self.part_name_material_scroll.winfo_children():
+            widget.destroy()
+
+        if "KEYMATERIAL" in df_filtered.columns:
+            material_counts = df_filtered["KEYMATERIAL"].value_counts()
+
+            # Crear una fila por cada KEYMATERIAL con colores diferenciados
+            for idx, (material, count) in enumerate(material_counts.items()):
+                row_frame = ctk.CTkFrame(
+                    self.part_name_material_scroll,
+                    fg_color=("gray85", "gray25"),
+                    corner_radius=6,
+                )
+                row_frame.grid(row=idx, column=0, sticky="ew", pady=3, padx=4)
+                row_frame.grid_columnconfigure(5, weight=1)
+
+                # PN: (color verde)
+                ctk.CTkLabel(
+                    row_frame, text="PN:",
+                    font=("Segoe UI", 13, "bold"),
+                    text_color=("#059669", "#10b981"),
+                ).grid(row=0, column=0, sticky="w", padx=(12, 4), pady=8)
+
+                # Valor del material (color azul)
+                ctk.CTkLabel(
+                    row_frame, text=material,
+                    font=("Segoe UI", 13, "bold"),
+                    text_color=("#2563eb", "#60a5fa"),
+                ).grid(row=0, column=1, sticky="w", padx=(0, 12))
+
+                # [ count ] Muestras (color naranja/amber)
+                ctk.CTkLabel(
+                    row_frame, text=f"[ {count} ]",
+                    font=("Segoe UI", 12, "bold"),
+                    text_color=("#d97706", "#f59e0b"),
+                ).grid(row=0, column=2, sticky="w", padx=(0, 4))
+
+                ctk.CTkLabel(
+                    row_frame, text="Muestras",
+                    font=("Segoe UI", 12),
+                    text_color=("gray40", "gray60"),
+                ).grid(row=0, column=3, sticky="w", padx=(0, 12))
+
+                # CLASSCODE: (color morado)
+                ctk.CTkLabel(
+                    row_frame, text="CLASSCODE:",
+                    font=("Segoe UI", 11, "bold"),
+                    text_color=("#7c3aed", "#a78bfa"),
+                ).grid(row=0, column=4, sticky="w", padx=(0, 4))
+
+                ctk.CTkLabel(
+                    row_frame, text=classcode,
+                    font=("Segoe UI", 11, "bold"),
+                    text_color=("#7c3aed", "#a78bfa"),
+                ).grid(row=0, column=5, sticky="w")
+
+                # Botón copiar (verde brillante)
+                copy_btn = ctk.CTkButton(
+                    row_frame,
+                    text="📋",
+                    command=lambda m=material: self._copy_material(m),
+                    width=40, height=32,
+                    font=("Segoe UI", 14),
+                    fg_color=("#10b981", "#059669"),
+                    hover_color=("#059669", "#047857"),
+                )
+                copy_btn.grid(row=0, column=6, padx=(8, 12), pady=4)
+        else:
+            no_data_label = ctk.CTkLabel(
+                self.part_name_material_scroll,
+                text="(columna KEYMATERIAL no encontrada)",
+                font=("Segoe UI", 12),
+                text_color="gray",
+            )
+            no_data_label.grid(row=0, column=0, sticky="w", padx=8, pady=8)
+
+        # Actualizar estadísticas
+        total_rows = len(df_filtered)
+        unique_materials = len(df_filtered["KEYMATERIAL"].unique()) if "KEYMATERIAL" in df_filtered.columns else 0
+        unique_barcodes = len(keyunitbarcodes) if "KEYUNITBARCODE" in df_filtered.columns else 0
+
+        stats_text = (
+            f"Total registros: {total_rows}  |  "
+            f"KEYUNITBARCODE únicos: {unique_barcodes}  |  "
+            f"KEYMATERIAL únicos: {unique_materials}"
+        )
+        self.part_name_stats_label.configure(text=stats_text)
+
+    def _generate_regex_pattern(self, values):
+        """Genera un patrón RegEx inteligente con variaciones específicas."""
+        import re
+
+        if not values:
+            return "(sin patrones)"
+
+        # Un solo valor: match exacto
+        if len(values) == 1:
+            return f"^{re.escape(values[0])}$"
+
+        # Encontrar prefijo común
+        prefix = values[0]
+        for val in values[1:]:
+            while not val.startswith(prefix) and prefix:
+                prefix = prefix[:-1]
+
+        if not prefix or len(prefix) < 3:
+            # Sin prefijo común suficiente: alternativas completas
+            if len(values) <= 5:
+                return f"^({'|'.join(re.escape(v) for v in values)})$"
+            return f"^({'|'.join(re.escape(v) for v in values[:5])}|...)$"
+
+        # Función auxiliar para truncar prefijo en un delimitador significativo
+        def truncate_at_last_delimiter(text):
+            """Trunca el texto en un delimitador significativo (prioriza %, luego otros)"""
+            # Primero buscar el segundo '%' si existe (patrón común en estos datos)
+            percent_positions = [i for i, char in enumerate(text) if char == '%']
+            if len(percent_positions) >= 2:
+                return text[:percent_positions[1] + 1]
+            elif len(percent_positions) == 1:
+                return text[:percent_positions[0] + 1]
+
+            # Si no hay '%', buscar el último delimitador no alfanumérico
+            for i in range(len(text) - 1, -1, -1):
+                if not text[i].isalnum():
+                    return text[:i + 1]
+            return text
+
+        # Analizar la parte variable después del prefijo
+        suffixes = [v[len(prefix):] for v in values]
+
+        # Encontrar longitud común de sufijos
+        suffix_lengths = [len(s) for s in suffixes]
+        if len(set(suffix_lengths)) == 1:
+            # Todos tienen la misma longitud: buscar variaciones
+            common_length = suffix_lengths[0]
+
+            # Buscar dónde empiezan las variaciones
+            variation_start = None
+            for i in range(min(len(s) for s in suffixes)):
+                chars_at_i = set(s[i] if i < len(s) else '' for s in suffixes)
+                if len(chars_at_i) > 1:
+                    variation_start = i
+                    break
+
+            # Si encontramos variaciones, extraerlas inteligentemente
+            if variation_start is not None:
+                # Calcular posición absoluta de la variación en la cadena completa
+                abs_variation_pos = len(prefix) + variation_start
+                total_length = len(values[0])
+
+                # Solo extraer variaciones si están en el primer 40% de la cadena
+                # (evita patrones complejos cuando las variaciones están muy adelante)
+                if abs_variation_pos > total_length * 0.4:
+                    # Variación muy adelante: usar patrón genérico truncado
+                    truncated_prefix = truncate_at_last_delimiter(prefix)
+                    new_suffix_length = common_length + (len(prefix) - len(truncated_prefix))
+                    return f"^{re.escape(truncated_prefix)}[-A-Z0-9]{{{new_suffix_length}}}$"
+
+                before_var = suffixes[0][:variation_start] if variation_start > 0 else ""
+
+                # Buscar hasta dónde llega la variación (siguiente carácter común)
+                variation_end = variation_start + 1
+                for i in range(variation_start + 1, common_length):
+                    chars_at_i = set(s[i] if i < len(s) else '' for s in suffixes)
+                    if len(chars_at_i) > 1:
+                        variation_end = i + 1
+                    else:
+                        break
+
+                # Extraer las variaciones únicas
+                variations = sorted(set(s[variation_start:variation_end] for s in suffixes))
+
+                # Solo crear patrón específico si hay pocas variaciones (2-5)
+                if 2 <= len(variations) <= 5 and all(v for v in variations):
+                    # Buscar el PRIMER delimitador común después de la variación
+                    # Solo incluir UN delimitador (%, -, etc.)
+                    common_after = ""
+                    if variation_end < common_length:
+                        chars_at_i = set(s[variation_end] if variation_end < len(s) else '' for s in suffixes)
+                        if len(chars_at_i) == 1:
+                            char = suffixes[0][variation_end]
+                            # Solo incluir si es un delimitador especial (no alfanumérico)
+                            if not char.isalnum():
+                                common_after = char
+
+                    # Si no hay delimitador después de la variación, usar patrón genérico truncado
+                    # (las variaciones sin delimitador son menos útiles de extraer)
+                    if not common_after:
+                        truncated_prefix = truncate_at_last_delimiter(prefix)
+                        new_suffix_length = common_length + (len(prefix) - len(truncated_prefix))
+                        return f"^{re.escape(truncated_prefix)}[-A-Z0-9]{{{new_suffix_length}}}$"
+
+                    common_after_len = len(common_after)
+                    remaining_chars = common_length - variation_end - common_after_len
+
+                    # Construir patrón con variaciones específicas
+                    pattern_parts = [f"^{re.escape(prefix)}"]
+                    if before_var:
+                        pattern_parts.append(re.escape(before_var))
+                    pattern_parts.append(f"({'|'.join(re.escape(v) for v in variations)})")
+                    if common_after:
+                        pattern_parts.append(re.escape(common_after))
+                    if remaining_chars > 0:
+                        pattern_parts.append(f"[-A-Z0-9]{{{remaining_chars}}}")
+                    pattern_parts.append("$")
+
+                    return "".join(pattern_parts)
+
+            # Si no se pudo detectar variación específica: patrón genérico truncado
+            truncated_prefix = truncate_at_last_delimiter(prefix)
+            new_suffix_length = common_length + (len(prefix) - len(truncated_prefix))
+            return f"^{re.escape(truncated_prefix)}[-A-Z0-9]{{{new_suffix_length}}}$"
+
+        # Longitudes diferentes: usar patrón flexible truncado
+        truncated_prefix = truncate_at_last_delimiter(prefix)
+        min_len = min(suffix_lengths) + (len(prefix) - len(truncated_prefix))
+        max_len = max(suffix_lengths) + (len(prefix) - len(truncated_prefix))
+        if min_len == max_len:
+            return f"^{re.escape(truncated_prefix)}[-A-Z0-9]{{{min_len}}}$"
+        else:
+            return f"^{re.escape(truncated_prefix)}[-A-Z0-9]{{{min_len},{max_len}}}$"
+
+    def _update_part_name_classcode(self):
+        """Actualiza el dropdown de CLASSCODE con los valores únicos del archivo cargado."""
+        if self.df_preview is None or "CLASSCODE" not in self.df_preview.columns:
+            self.part_name_classcode_menu.configure(values=["(sin datos)"])
+            self.part_name_classcode_var.set("(sin datos)")
+            return
+
+        # Obtener valores únicos de CLASSCODE
+        classcodes = sorted(self.df_preview["CLASSCODE"].dropna().unique().tolist())
+        if not classcodes:
+            self.part_name_classcode_menu.configure(values=["(sin datos)"])
+            self.part_name_classcode_var.set("(sin datos)")
+        else:
+            self.part_name_classcode_menu.configure(values=classcodes)
+            self.part_name_classcode_var.set(classcodes[0])
+
+    def _copy_regex(self):
+        """Copia el RegEx generado al portapapeles."""
+        regex_text = self.part_name_regex_text.get("1.0", "end-1c").strip()
+        if regex_text and regex_text != "Seleccioná un CLASSCODE y presioná 'Analizar'":
+            self.clipboard_clear()
+            self.clipboard_append(regex_text)
+            # Feedback visual temporal
+            original_text = self.part_name_regex_text.cget("fg_color")
+            self.part_name_regex_text.configure(fg_color=("#d1fae5", "#064e3b"))
+            self.after(200, lambda: self.part_name_regex_text.configure(fg_color=original_text))
+
+    def _copy_material(self, material):
+        """Copia el KEYMATERIAL al portapapeles."""
+        self.clipboard_clear()
+        self.clipboard_append(material)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

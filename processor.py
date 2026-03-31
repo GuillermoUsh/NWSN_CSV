@@ -477,11 +477,14 @@ def process_csv(
     rename_map:        Optional[dict[str, str]] = None,
     date_transforms:   Optional[dict[str, str]] = None,
     column_order:      Optional[list[str]] = None,
+    max_rows_per_file: int = 500_000,
     progress_callback: Optional[Callable[[float, str], None]] = None,
 ) -> dict:
     """
     Lee el CSV en chunks, aplica filtros/transformaciones y genera un CSV de salida
     por cada valor único de la PRIMERA columna del archivo original.
+    Si un archivo supera max_rows_per_file, se fracciona en múltiples archivos
+    (_part1, _part2, etc.) respetando grupos SN completos.
 
     Parámetros
     ----------
@@ -495,6 +498,7 @@ def process_csv(
     rename_map        : {col_real: nombre_preset} para renombrar encabezados en la salida
     date_transforms   : {col: base_date} para normalizar columnas de fecha/hora
     column_order      : orden deseado de columnas (usando nombres finales después de rename_map)
+    max_rows_per_file : máximo de filas por archivo antes de fraccionar (default 500,000)
     progress_callback : función (0.0–1.0, mensaje) para actualizar la barra de progreso
     """
 
@@ -537,6 +541,19 @@ def process_csv(
     if split_col is None:
         split_col = header_normalized[0]
 
+    # Detectar columna SN para fraccionamiento inteligente
+    sn_col = None
+    if rename_map:
+        for real_col, preset_col in rename_map.items():
+            if preset_col == "SN" and real_col in header_normalized:
+                sn_col = real_col
+                break
+    if sn_col is None:
+        for col in header_normalized:
+            if col in ("SN", "STR_PSN"):
+                sn_col = col
+                break
+
     # Estimar total de filas para la barra de progreso
     if progress_callback:
         progress_callback(0.01, "Contando filas del archivo...")
@@ -551,8 +568,13 @@ def process_csv(
     files_created: list[str]            = []
     total_written = 0
     rows_read     = 0
-    chunksize     = 25_000
+    chunksize     = 100_000  # OPTIMIZACIÓN: Aumentado de 25K a 100K para procesar más rápido
     chunk_iter    = None   # referencia explícita para cerrar en el finally
+
+    # Variables para fraccionamiento de archivos grandes
+    file_row_counts:  dict[str, int] = {}  # {base_name: total_rows_written}
+    file_part_numbers: dict[str, int] = {}  # {base_name: current_part_number}
+    last_sn_per_file: dict[str, str] = {}  # {current_file_path: last_sn_value}
 
     try:
         chunk_iter = pd.read_csv(
@@ -594,11 +616,23 @@ def process_csv(
             # Agrupar por la primera columna y escribir un CSV por grupo
             for group_val, group_df in chunk.groupby(split_col, sort=False):
                 safe_name = _sanitize_filename(group_val)
-                out_file  = str(output_path / f"{safe_name}.csv")
+                base_name = safe_name  # nombre base sin sufijo _part
 
-                if out_file not in file_handles:
-                    # Primera vez que aparece este grupo: abrir archivo y escribir encabezado
-                    fh     = open(out_file, "w", newline="", encoding="utf-8-sig")
+                # Inicializar rastreo para este grupo si es primera vez
+                if base_name not in file_part_numbers:
+                    file_part_numbers[base_name] = 1
+                    file_row_counts[base_name] = 0
+
+                # Determinar el archivo actual para este grupo
+                current_part = file_part_numbers[base_name]
+                if current_part == 1:
+                    out_file = str(output_path / f"{safe_name}.csv")
+                else:
+                    out_file = str(output_path / f"{safe_name}_part{current_part}.csv")
+
+                # Función auxiliar para crear/abrir archivo con header
+                def open_new_file(file_path, is_new_part=False):
+                    fh = open(file_path, "w", newline="", encoding="utf-8-sig")
                     writer = csv.writer(fh, delimiter=out_delimiter)
 
                     header_to_write = [c for c in available_write if c in group_df.columns]
@@ -631,16 +665,67 @@ def process_csv(
 
                     writer.writerow(header_output)
 
-                    file_handles[out_file] = fh
-                    csv_writers[out_file]  = (writer, header_to_write)
-                    files_created.append(out_file)
+                    file_handles[file_path] = fh
+                    csv_writers[file_path] = (writer, header_to_write)
+                    if file_path not in files_created:
+                        files_created.append(file_path)
+                    return writer, header_to_write
 
-                writer, header_to_write = csv_writers[out_file]
-                sub = group_df[header_to_write]
-                for row in sub.itertuples(index=False, name=None):
-                    writer.writerow(row)
+                # Abrir archivo si no existe
+                if out_file not in file_handles:
+                    writer, header_to_write = open_new_file(out_file)
+                else:
+                    writer, header_to_write = csv_writers[out_file]
 
-                total_written += len(group_df)
+                # OPTIMIZACIÓN: Procesar por grupos de SN en lugar de fila por fila
+                if sn_col and sn_col in group_df.columns:
+                    # Ordenar por SN para mantener grupos juntos
+                    group_df_sorted = group_df.sort_values(by=sn_col)
+                    # Agrupar por SN para procesamiento en lotes
+                    sn_groups = group_df_sorted.groupby(sn_col, sort=False)
+                else:
+                    # Si no hay columna SN, procesar todo el grupo de una vez
+                    group_df_sorted = group_df
+                    sn_groups = [(None, group_df_sorted)]
+
+                sub = group_df_sorted[header_to_write]
+
+                # Procesar por grupos de SN completos (mucho más rápido que fila por fila)
+                for sn_value, sn_group_df in sn_groups:
+                    sn_group_size = len(sn_group_df)
+
+                    # Verificar si necesitamos crear nuevo archivo part ANTES de escribir este grupo SN
+                    if (sn_col and
+                        file_row_counts[base_name] >= max_rows_per_file and
+                        sn_value != last_sn_per_file.get(out_file)):
+
+                        # Cerrar archivo actual
+                        if out_file in file_handles:
+                            file_handles[out_file].close()
+                            del file_handles[out_file]
+                            del csv_writers[out_file]
+                            if out_file in last_sn_per_file:
+                                del last_sn_per_file[out_file]
+
+                        # Crear nuevo archivo part
+                        file_part_numbers[base_name] += 1
+                        current_part = file_part_numbers[base_name]
+                        out_file = str(output_path / f"{safe_name}_part{current_part}.csv")
+                        file_row_counts[base_name] = 0
+
+                        writer, header_to_write = open_new_file(out_file, is_new_part=True)
+
+                    # OPTIMIZACIÓN: Escribir grupo SN completo de una vez con writerows()
+                    sn_sub = sn_group_df[header_to_write]
+                    rows_to_write = [tuple(row) for row in sn_sub.itertuples(index=False, name=None)]
+                    writer.writerows(rows_to_write)
+
+                    file_row_counts[base_name] += sn_group_size
+                    total_written += sn_group_size
+
+                    # Actualizar último SN visto
+                    if sn_value:
+                        last_sn_per_file[out_file] = str(sn_value)
 
             rows_read += chunksize
             if progress_callback and total_rows_est > 0:
