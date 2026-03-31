@@ -148,7 +148,9 @@ class CSVProcessorApp(ctk.CTk):
         # ── Estado para copiar celdas individuales ─────────────────────────────
         self._last_clicked_column: dict[ttk.Treeview, int] = {}  # {tree: col_index}
         self.preview_copy_label: "ctk.CTkLabel | None"    = None  # label indicador en preview
+        self.preview_copy_btn:   "ctk.CTkButton | None"   = None  # botón copiar en preview
         self.search_copy_label:  "ctk.CTkLabel | None"    = None  # label indicador en búsqueda
+        self.search_copy_btn:    "ctk.CTkButton | None"   = None  # botón copiar en búsqueda
         # ── Estado para redimensionar columnas en canvas header ────────────────
         self._resize_col_index: "int | None"     = None  # índice de columna siendo redimensionada
         self._resize_start_x:   int              = 0     # posición X inicial del mouse
@@ -538,12 +540,18 @@ class CSVProcessorApp(ctk.CTk):
 
         # Rastrear columna clickeada para copiar solo esa celda
         self.tree.bind("<Button-1>", lambda e: self._on_tree_click(e, self.tree))
+        # Actualizar label indicador cuando la selección ya está actualizada
+        self.tree.bind("<<TreeviewSelect>>", lambda e: self._update_copy_label(self.tree))
         # Permitir copiar valores con Ctrl+C
         self.tree.bind("<Control-c>", lambda e: self._copy_tree_selection(self.tree))
 
-        # Label indicador de qué celda se copiará con Ctrl+C
+        # Fila inferior: label indicador + botón copiar
+        copy_bar = tk.Frame(tree_frame, bg=self._tree_colors["bg"])
+        copy_bar.grid(row=3, column=0, columnspan=2, sticky="ew", padx=8, pady=(2, 4))
+        copy_bar.grid_columnconfigure(0, weight=1)
+
         self.preview_copy_label = ctk.CTkLabel(
-            tree_frame,
+            copy_bar,
             text="",
             font=("Segoe UI", 13, "bold"),
             text_color="gray60",
@@ -551,7 +559,22 @@ class CSVProcessorApp(ctk.CTk):
             corner_radius=6,
             anchor="w",
         )
-        self.preview_copy_label.grid(row=3, column=0, sticky="ew", padx=8, pady=(2, 4))
+        self.preview_copy_label.grid(row=0, column=0, sticky="ew")
+
+        self.preview_copy_btn = ctk.CTkButton(
+            copy_bar,
+            text="⎘",
+            width=32,
+            height=28,
+            font=("Segoe UI", 16),
+            fg_color=("#e2e8f0", "#334155"),
+            hover_color=("#cbd5e1", "#475569"),
+            text_color=("#1e293b", "#e2e8f0"),
+            corner_radius=6,
+            command=lambda: self._copy_tree_selection(self.tree),
+            state="disabled",
+        )
+        self.preview_copy_btn.grid(row=0, column=1, padx=(6, 0))
 
     # ── Tab: Filtros ─────────────────────────────────────────────────────────
 
@@ -1076,49 +1099,53 @@ class CSVProcessorApp(ctk.CTk):
         self._redraw_header_canvas()
 
     def _on_tree_click(self, event, tree: ttk.Treeview):
-        """Guarda el índice de la columna clickeada y actualiza el label indicador."""
+        """Guarda el índice de la columna clickeada. El label se actualiza en <<TreeviewSelect>>."""
         region = tree.identify_region(event.x, event.y)
         if region == "cell":
             col = tree.identify_column(event.x)
             if col:
-                # Extraer índice de columna (formato: '#1', '#2', etc.)
                 col_idx = int(col.replace('#', '')) - 1
                 self._last_clicked_column[tree] = col_idx
-
-                # Actualizar label indicador con el valor que se copiará
-                selection = tree.selection()
-                if selection:
-                    item = selection[0]
-                    values = tree.item(item, "values")
-                    if values and 0 <= col_idx < len(values):
-                        # Obtener nombre de la columna
-                        columns = tree["columns"]
-                        if isinstance(columns, tuple) and col_idx < len(columns):
-                            col_name = columns[col_idx]
-                        else:
-                            col_name = f"Columna {col_idx + 1}"
-
-                        cell_value = str(values[col_idx])
-                        # Truncar si es muy largo
-                        display_value = cell_value if len(cell_value) <= 50 else cell_value[:47] + "..."
-
-                        # Determinar cuál label actualizar
-                        if tree == self.tree and self.preview_copy_label:
-                            self.preview_copy_label.configure(
-                                text=f"📋 {col_name}: \"{display_value}\"",
-                                text_color=("#2563eb", "#60a5fa")
-                            )
-                        elif tree == self.search_tree and self.search_copy_label:
-                            self.search_copy_label.configure(
-                                text=f"📋 {col_name}: \"{display_value}\"",
-                                text_color=("#2563eb", "#60a5fa")
-                            )
         else:
-            # Si no se clickeó en una celda, limpiar los labels
+            # Si no se clickeó en una celda, limpiar label y deshabilitar botón
+            self._last_clicked_column.pop(tree, None)
             if tree == self.tree and self.preview_copy_label:
                 self.preview_copy_label.configure(text="", text_color="gray60")
+                self.preview_copy_btn.configure(state="disabled")
             elif tree == self.search_tree and self.search_copy_label:
                 self.search_copy_label.configure(text="", text_color="gray60")
+                self.search_copy_btn.configure(state="disabled")
+
+    def _update_copy_label(self, tree: ttk.Treeview):
+        """Actualiza el label indicador y habilita el botón copiar según la celda seleccionada."""
+        selection = tree.selection()
+        if not selection:
+            return
+        col_idx = self._last_clicked_column.get(tree)
+        if col_idx is None:
+            return
+        item = selection[0]
+        values = tree.item(item, "values")
+        if not values or not (0 <= col_idx < len(values)):
+            return
+
+        columns = tree["columns"]
+        col_name = columns[col_idx] if isinstance(columns, tuple) and col_idx < len(columns) else f"Columna {col_idx + 1}"
+        cell_value = str(values[col_idx])
+        display_value = cell_value
+
+        if tree == self.tree and self.preview_copy_label:
+            self.preview_copy_label.configure(
+                text=f"{col_name}: \"{display_value}\"",
+                text_color=("#2563eb", "#60a5fa")
+            )
+            self.preview_copy_btn.configure(state="normal")
+        elif tree == self.search_tree and self.search_copy_label:
+            self.search_copy_label.configure(
+                text=f"{col_name}: \"{display_value}\"",
+                text_color=("#2563eb", "#60a5fa")
+            )
+            self.search_copy_btn.configure(state="normal")
 
     def _copy_tree_selection(self, tree: ttk.Treeview):
         """
@@ -2073,12 +2100,18 @@ class CSVProcessorApp(ctk.CTk):
         hsb_s.grid(row=1, column=0, sticky="ew")
         # Rastrear columna clickeada para copiar solo esa celda
         self.search_tree.bind("<Button-1>", lambda e: self._on_tree_click(e, self.search_tree))
+        # Actualizar label indicador cuando la selección ya está actualizada
+        self.search_tree.bind("<<TreeviewSelect>>", lambda e: self._update_copy_label(self.search_tree))
         # Permitir copiar valores con Ctrl+C
         self.search_tree.bind("<Control-c>", lambda e: self._copy_tree_selection(self.search_tree))
 
-        # Label indicador de qué celda se copiará con Ctrl+C
+        # Fila inferior: label indicador + botón copiar
+        search_copy_bar = tk.Frame(results_frame, bg=self._tree_colors["bg"])
+        search_copy_bar.grid(row=2, column=0, sticky="ew", padx=8, pady=(2, 4))
+        search_copy_bar.grid_columnconfigure(0, weight=1)
+
         self.search_copy_label = ctk.CTkLabel(
-            results_frame,
+            search_copy_bar,
             text="",
             font=("Segoe UI", 13, "bold"),
             text_color="gray60",
@@ -2086,7 +2119,22 @@ class CSVProcessorApp(ctk.CTk):
             corner_radius=6,
             anchor="w",
         )
-        self.search_copy_label.grid(row=2, column=0, sticky="ew", padx=8, pady=(2, 4))
+        self.search_copy_label.grid(row=0, column=0, sticky="ew")
+
+        self.search_copy_btn = ctk.CTkButton(
+            search_copy_bar,
+            text="⎘",
+            width=32,
+            height=28,
+            font=("Segoe UI", 16),
+            fg_color=("#e2e8f0", "#334155"),
+            hover_color=("#cbd5e1", "#475569"),
+            text_color=("#1e293b", "#e2e8f0"),
+            corner_radius=6,
+            command=lambda: self._copy_tree_selection(self.search_tree),
+            state="disabled",
+        )
+        self.search_copy_btn.grid(row=0, column=1, padx=(6, 0))
 
         # ── Fila de exportación JSON ───────────────────────────────────────────
         export_row = ctk.CTkFrame(parent, fg_color=("#dbe8f5", "#1a3a5c"), corner_radius=8)
