@@ -2076,6 +2076,8 @@ class PartNameTab(QWidget):
         # Warning label para validación PHONEMODEL_NAME
         self.lbl_phonemodel_warning = QLabel("")
         self.lbl_phonemodel_warning.setFont(QFont("Segoe UI", 9))
+        self.lbl_phonemodel_warning.setWordWrap(True)
+        self.lbl_phonemodel_warning.setMinimumHeight(30)
         self.lbl_phonemodel_warning.setVisible(False)
         layout.addWidget(self.lbl_phonemodel_warning)
 
@@ -2191,9 +2193,12 @@ class PartNameTab(QWidget):
 
             elif len(phonemodels) == 1:
                 # OK: un solo PHONEMODEL_NAME
+                print(f"[Part Name] ✓ Un solo modelo detectado: {phonemodels[0]}")
                 self.lbl_phonemodel_warning.setText(f"✓  PHONEMODEL_NAME: {phonemodels[0]}")
                 self.lbl_phonemodel_warning.setStyleSheet("color: #22c55e; background: #d1fae5; padding: 6px; border-radius: 4px;")
                 self.lbl_phonemodel_warning.setVisible(True)
+                self.lbl_phonemodel_warning.raise_()  # Traer al frente
+                print(f"[Part Name] Badge visible: {self.lbl_phonemodel_warning.isVisible()}, texto: '{self.lbl_phonemodel_warning.text()}'")
 
                 # Usar todos los KEYUNITBARCODE para el RegEx
                 regex_values = subset["KEYUNITBARCODE"].dropna().unique().tolist()
