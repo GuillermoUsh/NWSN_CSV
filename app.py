@@ -1454,12 +1454,30 @@ class SearchTab(QWidget):
         title.setFont(QFont("Segoe UI", 13, QFont.Weight.Bold))
         layout.addWidget(title)
 
-        layout.addWidget(QLabel("Código(s) a buscar:"))
+        input_cols = QHBoxLayout()
+        input_cols.setSpacing(12)
+
+        left_col = QVBoxLayout()
+        left_col.setSpacing(4)
+        left_col.addWidget(QLabel("Códigos a buscar:"))
         self.txt_input = QPlainTextEdit()
-        self.txt_input.setFixedHeight(72)
-        self.txt_input.setPlaceholderText("ej: ZY32MJ3LZH\nO varios separados por coma o Enter")
-        layout.addWidget(self.txt_input)
+        self.txt_input.setFixedHeight(90)
+        self.txt_input.setPlaceholderText("ej: ZY32MJ3LZH\nVarios separados por coma o Enter")
+        left_col.addWidget(self.txt_input)
         QShortcut(QKeySequence("Ctrl+Return"), self.txt_input).activated.connect(self._start)
+
+        right_col = QVBoxLayout()
+        right_col.setSpacing(4)
+        right_col.addWidget(QLabel("Códigos no encontrados:"))
+        self.txt_not_found = QPlainTextEdit()
+        self.txt_not_found.setFixedHeight(90)
+        self.txt_not_found.setReadOnly(True)
+        self.txt_not_found.setPlaceholderText("—")
+        right_col.addWidget(self.txt_not_found)
+
+        input_cols.addLayout(left_col)
+        input_cols.addLayout(right_col)
+        layout.addLayout(input_cols)
 
         ctrl_row = QHBoxLayout()
         ctrl_row.addWidget(QLabel("Columna:"))
@@ -1597,6 +1615,8 @@ class SearchTab(QWidget):
         if not values:
             QMessageBox.warning(self, "Sin valor", "Ingresá al menos un valor a buscar."); return
         col = self.combo_col.currentText()
+        self._last_searched = values
+        self.txt_not_found.clear()
         self._worker = SearchWorker(files, values, col)
         self._worker.progress.connect(self._on_progress)
         self._worker.done.connect(self._on_done)
@@ -1619,7 +1639,27 @@ class SearchTab(QWidget):
         self._populate_table(results)
         count = len(results)
         self._finish_search(f"✓ {count} resultado(s) encontrado(s).", "success")
+        self._show_not_found(results)
         QApplication.restoreOverrideCursor()
+
+    def _show_not_found(self, results: list):
+        searched = getattr(self, "_last_searched", [])
+        if not searched:
+            return
+        col = self.combo_col.currentText()
+        found = {str(r.get(col, "")).strip().lower() for r in results}
+        not_found = [v for v in searched if v.strip().lower() not in found]
+        p = DARK if QApplication.instance().property("dark_mode") else LIGHT
+        if not_found:
+            self.txt_not_found.setPlainText("\n".join(not_found))
+            self.txt_not_found.setStyleSheet(
+                f"color: {p['error']}; background-color: {p['surface']}; border: 1px solid {p['border']};"
+            )
+        else:
+            self.txt_not_found.setPlainText("✓ Todos encontrados")
+            self.txt_not_found.setStyleSheet(
+                f"color: {p['success']}; background-color: {p['surface']}; border: 1px solid {p['border']};"
+            )
 
     def _on_error(self, msg):
         self._finish_search(f"✗ Error: {msg}", "error")
@@ -1701,6 +1741,8 @@ class SearchTab(QWidget):
         self._result_df = None
         self.table.set_model(PandasTableModel(pd.DataFrame(), DARK if QApplication.instance().property("dark_mode") else LIGHT))
         self.progress.reset()
+        self.txt_not_found.clear()
+        self.txt_not_found.setStyleSheet("")
         self._set_status("Resultados limpiados.", "muted")
 
     def _set_status(self, msg, state):
@@ -1719,7 +1761,19 @@ class SearchTab(QWidget):
         files = self._files_panel.get_files()
         base  = Path(files[0]).parent if files else Path.home()
         out_dir = str(base / "search_output")
-        df = self._result_df.copy()
+        # Exportar con el mismo filtro de columnas que muestra la grilla
+        if self.rb_cols_preset.isChecked():
+            available = set(self._result_df.columns)
+            ordered = []
+            for candidates in self._PRESET_COL_ORDER:
+                for c in candidates:
+                    if c in available:
+                        ordered.append(c)
+                        break
+            keep = ordered if ordered else [c for c in self._result_df.columns if c != "Archivo"]
+            df = self._result_df[keep].copy()
+        else:
+            df = self._result_df.drop(columns=["Archivo"], errors="ignore").copy()
 
         def export_fn(df, folder_col, file_col, out_dir, fmt, cancel_fn, progress_cb):
             import json as _json
@@ -1760,6 +1814,17 @@ class SearchTab(QWidget):
         self.table.apply_palette(p)
         if self._result_df is not None and not self._result_df.empty:
             self.table.table.view.model().sourceModel().update_palette(p)
+        # Re-aplicar color de txt_not_found con el nuevo tema
+        text = self.txt_not_found.toPlainText()
+        if text:
+            color = p['success'] if text.startswith("✓") else p['error']
+            self.txt_not_found.setStyleSheet(
+                f"color: {color}; background-color: {p['surface']}; border: 1px solid {p['border']};"
+            )
+        else:
+            self.txt_not_found.setStyleSheet(
+                f"background-color: {p['surface']}; border: 1px solid {p['border']};"
+            )
 
 # ── Tab: Agregar Columna ──────────────────────────────────────────────────────
 
@@ -2043,12 +2108,15 @@ class MainWindow(QMainWindow):
         self.lbl_file = QLabel("Ningún archivo cargado")
         self.lbl_file.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         self.lbl_file.setFont(QFont("Segoe UI", 10, QFont.Weight.Bold))
+        self._top_spacer = QWidget()
+        self._top_spacer.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         self.btn_theme = QToolButton()
         self.btn_theme.setText("☀")
         self.btn_theme.setFixedSize(36, 36)
         self.btn_theme.clicked.connect(self._toggle_theme)
         top_layout.addWidget(self.btn_open)
         top_layout.addWidget(self.lbl_file)
+        top_layout.addWidget(self._top_spacer)
         top_layout.addWidget(self.btn_theme)
         root.addWidget(self._top_bar)
 
@@ -2099,7 +2167,9 @@ class MainWindow(QMainWindow):
     def _on_tab_changed(self, index: int):
         is_search = (self.tabs.tabText(index).strip() == "Buscar")
         self._left_stack.setCurrentIndex(1 if is_search else 0)
-        self._top_bar.setVisible(not is_search)
+        self.btn_open.setVisible(not is_search)
+        self.lbl_file.setVisible(not is_search)
+        self._top_spacer.setVisible(is_search)
 
     # ── Carga de archivo ──────────────────────────────────────────────────────
 
