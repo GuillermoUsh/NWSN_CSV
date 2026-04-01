@@ -2059,6 +2059,7 @@ class PartNameTab(QWidget):
         super().__init__(parent)
         self._df: pd.DataFrame | None = None
         self._palette: dict = {}
+        self._current_regex: str = ""
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(12, 12, 12, 12)
@@ -2080,26 +2081,28 @@ class PartNameTab(QWidget):
 
         layout.addWidget(hline())
 
+        # RegEx header con botón copiar
         hdr_row = QHBoxLayout()
-        hdr_row.addWidget(QLabel("📝  RegEx para KEYUNITBARCODE:"))
-        self.btn_copy_regex = QPushButton("📋  Copiar RegEx"); self.btn_copy_regex.setFixedHeight(28)
-        self.btn_copy_regex.clicked.connect(self._copy_regex)
-        hdr_row.addStretch(); hdr_row.addWidget(self.btn_copy_regex)
-        layout.addLayout(hdr_row)
+        self.lbl_regex = QLabel("RegEx para CLASSCODE: (Seleccioná un CLASSCODE y presioná 'Analizar')")
+        self.lbl_regex.setFont(QFont("Consolas", 9))
+        self.lbl_regex.setWordWrap(True)
+        self.lbl_regex.setStyleSheet("padding: 6px; background: #f3f4f6; border-radius: 4px;")
+        self.lbl_regex.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
 
-        self.regex_text = QTextEdit()
-        self.regex_text.setReadOnly(True)
-        self.regex_text.setFont(QFont("Consolas", 10))
-        self.regex_text.setFixedHeight(140)
-        self.regex_text.setPlaceholderText("Seleccioná un CLASSCODE y presioná 'Analizar'")
-        layout.addWidget(self.regex_text)
+        self.btn_copy_regex = QPushButton("📋  Copiar"); self.btn_copy_regex.setFixedHeight(28); self.btn_copy_regex.setFixedWidth(80)
+        self.btn_copy_regex.clicked.connect(self._copy_regex)
+        self.btn_copy_regex.setEnabled(False)
+
+        hdr_row.addWidget(self.lbl_regex, stretch=1)
+        hdr_row.addWidget(self.btn_copy_regex)
+        layout.addLayout(hdr_row)
 
         layout.addWidget(hline())
 
-        # Grilla de KEYUNITBARCODE
+        # Grilla de KEYUNITBARCODE (más grande ahora)
         layout.addWidget(QLabel("📋  KEYUNITBARCODE del CLASSCODE seleccionado:"))
         self.table_keyunit = DataTable()
-        self.table_keyunit.setFixedHeight(250)
+        self.table_keyunit.setFixedHeight(400)  # Aumentado de 250 a 400
         layout.addWidget(self.table_keyunit)
 
         layout.addWidget(hline())
@@ -2150,27 +2153,28 @@ class PartNameTab(QWidget):
 
         # Validación PHONEMODEL_NAME y generación de RegEx
         self.lbl_phonemodel_warning.setVisible(False)
+        self.btn_copy_regex.setEnabled(False)
         regex_values = []
+        process_cancelled = False
 
         if "PHONEMODEL_NAME" in self._df.columns and "KEYUNITBARCODE" in self._df.columns:
+            # Revisar TODOS los registros del CLASSCODE (no solo una muestra)
             phonemodels = subset["PHONEMODEL_NAME"].dropna().unique().tolist()
 
             if len(phonemodels) > 1:
-                # Advertencia: múltiples PHONEMODEL_NAME
-                models_str = ", ".join(str(m) for m in phonemodels[:3])
-                if len(phonemodels) > 3:
-                    models_str += f" (+{len(phonemodels) - 3} más)"
+                # CANCELAR: múltiples PHONEMODEL_NAME detectados
+                models_str = ", ".join(str(m) for m in phonemodels)
                 self.lbl_phonemodel_warning.setText(
-                    f"⚠️  Advertencia: Este CLASSCODE tiene múltiples PHONEMODEL_NAME: {models_str}\n"
-                    f"💡 RegEx generado solo con el PHONEMODEL_NAME más común: {phonemodels[0]}"
+                    f"❌  ERROR: Este CLASSCODE tiene múltiples PHONEMODEL_NAME: {models_str}\n"
+                    f"⚠️  Proceso cancelado. No se puede generar RegEx con modelos mezclados."
                 )
-                self.lbl_phonemodel_warning.setStyleSheet("color: #f59e0b; background: #fef3c7; padding: 6px; border-radius: 4px;")
+                self.lbl_phonemodel_warning.setStyleSheet("color: #dc2626; background: #fee2e2; padding: 8px; border-radius: 4px; font-weight: 600;")
                 self.lbl_phonemodel_warning.setVisible(True)
 
-                # Usar solo el PHONEMODEL_NAME más común para el RegEx
-                most_common_model = subset["PHONEMODEL_NAME"].value_counts().index[0]
-                subset_filtered = subset[subset["PHONEMODEL_NAME"] == most_common_model]
-                regex_values = subset_filtered["KEYUNITBARCODE"].dropna().unique().tolist()
+                # Actualizar label de RegEx
+                self.lbl_regex.setText(f"RegEx para {code}: ❌ PROCESO CANCELADO (modelos mezclados)")
+                self.lbl_regex.setStyleSheet("padding: 6px; background: #fee2e2; border-radius: 4px; color: #dc2626; font-weight: 600;")
+                process_cancelled = True
 
             elif len(phonemodels) == 1:
                 # OK: un solo PHONEMODEL_NAME
@@ -2187,14 +2191,20 @@ class PartNameTab(QWidget):
             # Sin columna PHONEMODEL_NAME: usar todos
             regex_values = subset["KEYUNITBARCODE"].dropna().unique().tolist()
 
-        # RegEx
-        if regex_values:
-            pattern = self._generate_regex(regex_values)
-            self.regex_text.setPlainText(pattern)
-        elif "KEYUNITBARCODE" in self._df.columns:
-            self.regex_text.setPlainText("No hay KEYUNITBARCODE para generar RegEx.")
-        else:
-            self.regex_text.setPlainText("Columna KEYUNITBARCODE no encontrada.")
+        # RegEx (solo si no se canceló el proceso)
+        if not process_cancelled:
+            if regex_values:
+                pattern = self._generate_regex(regex_values)
+                self.lbl_regex.setText(f"RegEx para {code}: {pattern}")
+                self.lbl_regex.setStyleSheet("padding: 6px; background: #f3f4f6; border-radius: 4px; color: #111827;")
+                self.btn_copy_regex.setEnabled(True)
+                self._current_regex = pattern  # Guardar para copiar
+            elif "KEYUNITBARCODE" in self._df.columns:
+                self.lbl_regex.setText(f"RegEx para {code}: No hay KEYUNITBARCODE para generar RegEx")
+                self.lbl_regex.setStyleSheet("padding: 6px; background: #fef3c7; border-radius: 4px; color: #f59e0b;")
+            else:
+                self.lbl_regex.setText(f"RegEx para {code}: Columna KEYUNITBARCODE no encontrada")
+                self.lbl_regex.setStyleSheet("padding: 6px; background: #fee2e2; border-radius: 4px; color: #dc2626;")
 
         # KEYMATERIAL (nuevo formato con colores suaves)
         while self._mat_layout.count() > 1:
@@ -2370,8 +2380,12 @@ class PartNameTab(QWidget):
             return f"^{re.escape(truncated_prefix)}[-A-Z0-9]{{{min_len},{max_len}}}$"
 
     def _copy_regex(self):
-        text = self.regex_text.toPlainText().strip()
-        if text: QApplication.clipboard().setText(text)
+        if self._current_regex:
+            QApplication.clipboard().setText(self._current_regex)
+            # Feedback visual temporal
+            original_text = self.btn_copy_regex.text()
+            self.btn_copy_regex.setText("✓ Copiado")
+            QTimer.singleShot(1500, lambda: self.btn_copy_regex.setText(original_text))
 
 # ── Ventana principal ─────────────────────────────────────────────────────────
 
