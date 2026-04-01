@@ -2086,7 +2086,6 @@ class PartNameTab(QWidget):
         self.lbl_regex = QLabel("RegEx para CLASSCODE: (Seleccioná un CLASSCODE y presioná 'Analizar')")
         self.lbl_regex.setFont(QFont("Consolas", 9))
         self.lbl_regex.setWordWrap(True)
-        self.lbl_regex.setStyleSheet("padding: 6px; background: #f3f4f6; border-radius: 4px;")
         self.lbl_regex.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
 
         self.btn_copy_regex = QPushButton("📋  Copiar"); self.btn_copy_regex.setFixedHeight(28); self.btn_copy_regex.setFixedWidth(80)
@@ -2125,6 +2124,13 @@ class PartNameTab(QWidget):
     def setup(self, df: pd.DataFrame, columns: list, palette: dict):
         self._df = df
         self._palette = palette
+
+        # Aplicar estilo inicial al label de RegEx según la paleta
+        self.lbl_regex.setStyleSheet(
+            f"padding: 6px; background: {palette['surface2']}; "
+            f"border-radius: 4px; color: {palette['text_muted']};"
+        )
+
         if "CLASSCODE" in columns:
             codes = sorted(df["CLASSCODE"].dropna().unique().tolist()) if self._df is not None and "CLASSCODE" in df.columns else []
             self.combo_classcode.clear()
@@ -2173,7 +2179,10 @@ class PartNameTab(QWidget):
 
                 # Actualizar label de RegEx
                 self.lbl_regex.setText(f"RegEx para {code}: ❌ PROCESO CANCELADO (modelos mezclados)")
-                self.lbl_regex.setStyleSheet("padding: 6px; background: #fee2e2; border-radius: 4px; color: #dc2626; font-weight: 600;")
+                self.lbl_regex.setStyleSheet(
+                    f"padding: 6px; background: {self._palette['surface2']}; "
+                    f"border-radius: 4px; color: {self._palette['error']}; font-weight: 600;"
+                )
                 process_cancelled = True
 
             elif len(phonemodels) == 1:
@@ -2196,15 +2205,24 @@ class PartNameTab(QWidget):
             if regex_values:
                 pattern = self._generate_regex(regex_values)
                 self.lbl_regex.setText(f"RegEx para {code}: {pattern}")
-                self.lbl_regex.setStyleSheet("padding: 6px; background: #f3f4f6; border-radius: 4px; color: #111827;")
+                self.lbl_regex.setStyleSheet(
+                    f"padding: 6px; background: {self._palette['surface2']}; "
+                    f"border-radius: 4px; color: {self._palette['text']};"
+                )
                 self.btn_copy_regex.setEnabled(True)
                 self._current_regex = pattern  # Guardar para copiar
             elif "KEYUNITBARCODE" in self._df.columns:
                 self.lbl_regex.setText(f"RegEx para {code}: No hay KEYUNITBARCODE para generar RegEx")
-                self.lbl_regex.setStyleSheet("padding: 6px; background: #fef3c7; border-radius: 4px; color: #f59e0b;")
+                self.lbl_regex.setStyleSheet(
+                    f"padding: 6px; background: {self._palette['surface2']}; "
+                    f"border-radius: 4px; color: {self._palette['warning']};"
+                )
             else:
                 self.lbl_regex.setText(f"RegEx para {code}: Columna KEYUNITBARCODE no encontrada")
-                self.lbl_regex.setStyleSheet("padding: 6px; background: #fee2e2; border-radius: 4px; color: #dc2626;")
+                self.lbl_regex.setStyleSheet(
+                    f"padding: 6px; background: {self._palette['surface2']}; "
+                    f"border-radius: 4px; color: {self._palette['error']};"
+                )
 
         # KEYMATERIAL (nuevo formato con colores suaves)
         while self._mat_layout.count() > 1:
