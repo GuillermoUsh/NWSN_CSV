@@ -2058,6 +2058,7 @@ class PartNameTab(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._df: pd.DataFrame | None = None
+        self._palette: dict = {}
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(12, 12, 12, 12)
@@ -2093,6 +2094,16 @@ class PartNameTab(QWidget):
         self.regex_text.setPlaceholderText("Seleccioná un CLASSCODE y presioná 'Analizar'")
         layout.addWidget(self.regex_text)
 
+        layout.addWidget(hline())
+
+        # Grilla de KEYUNITBARCODE
+        layout.addWidget(QLabel("📋  KEYUNITBARCODE del CLASSCODE seleccionado:"))
+        self.table_keyunit = DataTable()
+        self.table_keyunit.setFixedHeight(250)
+        layout.addWidget(self.table_keyunit)
+
+        layout.addWidget(hline())
+
         layout.addWidget(QLabel("📊  KEYMATERIAL (agrupados):"))
 
         scroll = QScrollArea(); scroll.setWidgetResizable(True); scroll.setFixedHeight(180)
@@ -2108,8 +2119,9 @@ class PartNameTab(QWidget):
         layout.addWidget(self.lbl_stats)
         layout.addStretch()
 
-    def setup(self, df: pd.DataFrame, columns: list):
+    def setup(self, df: pd.DataFrame, columns: list, palette: dict):
         self._df = df
+        self._palette = palette
         if "CLASSCODE" in columns:
             codes = sorted(df["CLASSCODE"].dropna().unique().tolist()) if self._df is not None and "CLASSCODE" in df.columns else []
             self.combo_classcode.clear()
@@ -2121,29 +2133,66 @@ class PartNameTab(QWidget):
         if not code: return
         subset = self._df[self._df.get("CLASSCODE", pd.Series()) == code] if "CLASSCODE" in self._df.columns else self._df
 
-        # Validación PHONEMODEL_NAME
+        # Mostrar grilla con KEYUNITBARCODE y PHONEMODEL_NAME
+        if "KEYUNITBARCODE" in self._df.columns:
+            # Crear DataFrame con las columnas relevantes
+            columns_to_show = ["PHONEMODEL_NAME", "KEYUNITBARCODE"]
+            if "KEYMATERIAL" in self._df.columns:
+                columns_to_show.append("KEYMATERIAL")
+
+            available_cols = [col for col in columns_to_show if col in subset.columns]
+            df_display = subset[available_cols].copy()
+
+            # Mostrar en grilla
+            model = PandasTableModel(df_display, self._palette)
+            self.table_keyunit.set_model(model)
+            self.table_keyunit.apply_palette(self._palette)
+
+        # Validación PHONEMODEL_NAME y generación de RegEx
         self.lbl_phonemodel_warning.setVisible(False)
-        if "PHONEMODEL_NAME" in self._df.columns:
+        regex_values = []
+
+        if "PHONEMODEL_NAME" in self._df.columns and "KEYUNITBARCODE" in self._df.columns:
             phonemodels = subset["PHONEMODEL_NAME"].dropna().unique().tolist()
+
             if len(phonemodels) > 1:
                 # Advertencia: múltiples PHONEMODEL_NAME
                 models_str = ", ".join(str(m) for m in phonemodels[:3])
                 if len(phonemodels) > 3:
                     models_str += f" (+{len(phonemodels) - 3} más)"
-                self.lbl_phonemodel_warning.setText(f"⚠️  Advertencia: Este CLASSCODE tiene múltiples PHONEMODEL_NAME: {models_str}")
+                self.lbl_phonemodel_warning.setText(
+                    f"⚠️  Advertencia: Este CLASSCODE tiene múltiples PHONEMODEL_NAME: {models_str}\n"
+                    f"💡 RegEx generado solo con el PHONEMODEL_NAME más común: {phonemodels[0]}"
+                )
                 self.lbl_phonemodel_warning.setStyleSheet("color: #f59e0b; background: #fef3c7; padding: 6px; border-radius: 4px;")
                 self.lbl_phonemodel_warning.setVisible(True)
+
+                # Usar solo el PHONEMODEL_NAME más común para el RegEx
+                most_common_model = subset["PHONEMODEL_NAME"].value_counts().index[0]
+                subset_filtered = subset[subset["PHONEMODEL_NAME"] == most_common_model]
+                regex_values = subset_filtered["KEYUNITBARCODE"].dropna().unique().tolist()
+
             elif len(phonemodels) == 1:
                 # OK: un solo PHONEMODEL_NAME
                 self.lbl_phonemodel_warning.setText(f"✓  PHONEMODEL_NAME: {phonemodels[0]}")
                 self.lbl_phonemodel_warning.setStyleSheet("color: #22c55e; background: #d1fae5; padding: 6px; border-radius: 4px;")
                 self.lbl_phonemodel_warning.setVisible(True)
 
+                # Usar todos los KEYUNITBARCODE para el RegEx
+                regex_values = subset["KEYUNITBARCODE"].dropna().unique().tolist()
+            else:
+                # Sin PHONEMODEL_NAME: usar todos
+                regex_values = subset["KEYUNITBARCODE"].dropna().unique().tolist()
+        elif "KEYUNITBARCODE" in self._df.columns:
+            # Sin columna PHONEMODEL_NAME: usar todos
+            regex_values = subset["KEYUNITBARCODE"].dropna().unique().tolist()
+
         # RegEx
-        if "KEYUNITBARCODE" in self._df.columns:
-            values = subset["KEYUNITBARCODE"].dropna().unique().tolist()
-            pattern = self._generate_regex(values)
+        if regex_values:
+            pattern = self._generate_regex(regex_values)
             self.regex_text.setPlainText(pattern)
+        elif "KEYUNITBARCODE" in self._df.columns:
+            self.regex_text.setPlainText("No hay KEYUNITBARCODE para generar RegEx.")
         else:
             self.regex_text.setPlainText("Columna KEYUNITBARCODE no encontrada.")
 
@@ -2474,7 +2523,7 @@ class MainWindow(QMainWindow):
         self.tab_addcol.setup(path, enc, delim, columns, self._p)
         self.tab_addcol.set_preview(df, self._p)
         self.tab_search.set_columns(columns)
-        self.tab_partname.setup(df, columns)
+        self.tab_partname.setup(df, columns, self._p)
 
         self.status.showMessage(f"Cargado: {path}", 4000)
 
