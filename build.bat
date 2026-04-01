@@ -14,8 +14,10 @@ python -m PyInstaller ^
   --onefile ^
   --windowed ^
   --name "CSV_Processor" ^
-  --collect-data customtkinter ^
-  --hidden-import customtkinter ^
+  --hidden-import PyQt6 ^
+  --hidden-import PyQt6.QtWidgets ^
+  --hidden-import PyQt6.QtCore ^
+  --hidden-import PyQt6.QtGui ^
   --hidden-import pandas ^
   --hidden-import chardet ^
   main.py

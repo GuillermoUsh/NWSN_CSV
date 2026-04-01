@@ -3,21 +3,17 @@ main.py — Punto de entrada del CSV Processor.
 """
 
 import sys
-import os
-
-# Necesario para PyInstaller --onefile: los recursos están en sys._MEIPASS
-if getattr(sys, "frozen", False):
-    os.chdir(sys._MEIPASS)
-
-import customtkinter as ctk
-from app import CSVProcessorApp
+from PyQt6.QtWidgets import QApplication
+from app import MainWindow
 
 
 def main():
-    ctk.set_appearance_mode("System")   # "System", "Dark" o "Light"
-    ctk.set_default_color_theme("blue")
-    app = CSVProcessorApp()
-    app.mainloop()
+    app = QApplication(sys.argv)
+    app.setStyle("Fusion")
+    app.setProperty("dark_mode", True)
+    win = MainWindow()
+    win.show()
+    sys.exit(app.exec())
 
 
 if __name__ == "__main__":
