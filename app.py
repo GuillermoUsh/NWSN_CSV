@@ -2101,14 +2101,14 @@ class PartNameTab(QWidget):
         # Grilla de KEYUNITBARCODE (más grande ahora)
         layout.addWidget(QLabel("📋  KEYUNITBARCODE del CLASSCODE seleccionado:"))
         self.table_keyunit = DataTable()
-        self.table_keyunit.setFixedHeight(400)  # Aumentado de 250 a 400
+        self.table_keyunit.setFixedHeight(300)  # Reducido de 400 a 300 para que quepa todo
         layout.addWidget(self.table_keyunit)
 
         layout.addWidget(hline())
 
         layout.addWidget(QLabel("📊  KEYMATERIAL (agrupados):"))
 
-        scroll = QScrollArea(); scroll.setWidgetResizable(True); scroll.setFixedHeight(180)
+        scroll = QScrollArea(); scroll.setWidgetResizable(True); scroll.setFixedHeight(150)  # Reducido de 180 a 150
         self._mat_widget = QWidget(); self._mat_layout = QVBoxLayout(self._mat_widget)
         self._mat_layout.setContentsMargins(4, 4, 4, 4); self._mat_layout.setSpacing(3)
         self._mat_layout.addStretch()
@@ -2163,9 +2163,13 @@ class PartNameTab(QWidget):
         regex_values = []
         process_cancelled = False
 
-        if "PHONEMODEL_NAME" in self._df.columns and "KEYUNITBARCODE" in self._df.columns:
+        # Limpiar nombres de columnas (por si tienen espacios)
+        df_columns = [col.strip() for col in self._df.columns]
+
+        if "PHONEMODEL_NAME" in df_columns and "KEYUNITBARCODE" in df_columns:
             # Revisar TODOS los registros del CLASSCODE (no solo una muestra)
             phonemodels = subset["PHONEMODEL_NAME"].dropna().unique().tolist()
+            print(f"[Part Name] Analizando {code}: {len(phonemodels)} PHONEMODEL_NAME únicos: {phonemodels}")
 
             if len(phonemodels) > 1:
                 # CANCELAR: múltiples PHONEMODEL_NAME detectados
