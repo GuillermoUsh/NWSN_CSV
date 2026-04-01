@@ -2066,10 +2066,16 @@ class PartNameTab(QWidget):
         row1 = QHBoxLayout()
         row1.addWidget(QLabel("CLASSCODE:"))
         self.combo_classcode = QComboBox(); self.combo_classcode.setMinimumWidth(200)
-        self.btn_analyze = QPushButton("🔍  Analizar"); self.btn_analyze.setObjectName("accent"); self.btn_analyze.setFixedHeight(34)
+        self.btn_analyze = QPushButton("🔍  Analizar"); self.btn_analyze.setObjectName("accent"); self.btn_analyze.setFixedHeight(38)
         self.btn_analyze.clicked.connect(self._analyze)
         row1.addWidget(self.combo_classcode); row1.addWidget(self.btn_analyze); row1.addStretch()
         layout.addLayout(row1)
+
+        # Warning label para validación PHONEMODEL_NAME
+        self.lbl_phonemodel_warning = QLabel("")
+        self.lbl_phonemodel_warning.setFont(QFont("Segoe UI", 9))
+        self.lbl_phonemodel_warning.setVisible(False)
+        layout.addWidget(self.lbl_phonemodel_warning)
 
         layout.addWidget(hline())
 
@@ -2115,6 +2121,24 @@ class PartNameTab(QWidget):
         if not code: return
         subset = self._df[self._df.get("CLASSCODE", pd.Series()) == code] if "CLASSCODE" in self._df.columns else self._df
 
+        # Validación PHONEMODEL_NAME
+        self.lbl_phonemodel_warning.setVisible(False)
+        if "PHONEMODEL_NAME" in self._df.columns:
+            phonemodels = subset["PHONEMODEL_NAME"].dropna().unique().tolist()
+            if len(phonemodels) > 1:
+                # Advertencia: múltiples PHONEMODEL_NAME
+                models_str = ", ".join(str(m) for m in phonemodels[:3])
+                if len(phonemodels) > 3:
+                    models_str += f" (+{len(phonemodels) - 3} más)"
+                self.lbl_phonemodel_warning.setText(f"⚠️  Advertencia: Este CLASSCODE tiene múltiples PHONEMODEL_NAME: {models_str}")
+                self.lbl_phonemodel_warning.setStyleSheet("color: #f59e0b; background: #fef3c7; padding: 6px; border-radius: 4px;")
+                self.lbl_phonemodel_warning.setVisible(True)
+            elif len(phonemodels) == 1:
+                # OK: un solo PHONEMODEL_NAME
+                self.lbl_phonemodel_warning.setText(f"✓  PHONEMODEL_NAME: {phonemodels[0]}")
+                self.lbl_phonemodel_warning.setStyleSheet("color: #22c55e; background: #d1fae5; padding: 6px; border-radius: 4px;")
+                self.lbl_phonemodel_warning.setVisible(True)
+
         # RegEx
         if "KEYUNITBARCODE" in self._df.columns:
             values = subset["KEYUNITBARCODE"].dropna().unique().tolist()
@@ -2123,7 +2147,7 @@ class PartNameTab(QWidget):
         else:
             self.regex_text.setPlainText("Columna KEYUNITBARCODE no encontrada.")
 
-        # KEYMATERIAL
+        # KEYMATERIAL (nuevo formato con colores suaves)
         while self._mat_layout.count() > 1:
             item = self._mat_layout.takeAt(0)
             if item.widget(): item.widget().deleteLater()
@@ -2131,41 +2155,170 @@ class PartNameTab(QWidget):
         if "KEYMATERIAL" in self._df.columns:
             counts = subset["KEYMATERIAL"].value_counts().head(50)
             for mat, cnt in counts.items():
-                row_w = QWidget(); row_h = QHBoxLayout(row_w); row_h.setContentsMargins(0, 0, 0, 0)
-                lbl_m = QLabel(str(mat)); lbl_m.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
-                lbl_c = QLabel(f"× {cnt}"); lbl_c.setStyleSheet("color: gray;"); lbl_c.setFixedWidth(60)
-                row_h.addWidget(lbl_m); row_h.addWidget(lbl_c)
+                row_w = QWidget(); row_h = QHBoxLayout(row_w); row_h.setContentsMargins(0, 0, 0, 0); row_h.setSpacing(4)
+
+                # Formato: PN: {material} CLASSCODE: {code} [{count}]
+                lbl_pn = QLabel("PN:")
+                lbl_pn.setStyleSheet("color: #6b7280; font-weight: 600;")
+
+                lbl_mat = QLabel(str(mat))
+                lbl_mat.setStyleSheet("color: #111827; font-weight: 500;")
+                lbl_mat.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+
+                lbl_cc = QLabel("CLASSCODE:")
+                lbl_cc.setStyleSheet("color: #6b7280; font-weight: 600;")
+
+                lbl_code = QLabel(str(code))
+                lbl_code.setStyleSheet("color: #111827; font-weight: 500;")
+
+                lbl_cnt = QLabel(f"[{cnt}]")
+                lbl_cnt.setStyleSheet("color: #9ca3af; font-weight: 500;")
+                lbl_cnt.setFixedWidth(50)
+
+                row_h.addWidget(lbl_pn)
+                row_h.addWidget(lbl_mat)
+                row_h.addWidget(lbl_cc)
+                row_h.addWidget(lbl_code)
+                row_h.addWidget(lbl_cnt)
+
                 self._mat_layout.insertWidget(self._mat_layout.count() - 1, row_w)
 
         desc = CLASS_CODE_MAP.get(code, code)
         self.lbl_stats.setText(f"{desc}  ·  {len(subset)} registros")
 
     def _generate_regex(self, values: list) -> str:
-        if not values: return ""
+        """Genera un patrón RegEx inteligente con variaciones específicas."""
+        if not values:
+            return ""
+
         import re
-        # Prefijos comunes
+
+        # Un solo valor: match exacto
         if len(values) == 1:
-            return re.escape(values[0])
+            return f"^{re.escape(values[0])}$"
+
         # Encontrar prefijo común
         prefix = values[0]
-        for v in values[1:]:
-            while not v.startswith(prefix):
+        for val in values[1:]:
+            while not val.startswith(prefix) and prefix:
                 prefix = prefix[:-1]
-                if not prefix: break
-        if len(prefix) >= 3:
-            rest_lens = set(len(v) - len(prefix) for v in values)
-            if len(rest_lens) == 1:
-                return f"^{re.escape(prefix)}[A-Z0-9]{{{list(rest_lens)[0]}}}$"
-            min_l, max_l = min(rest_lens), max(rest_lens)
-            return f"^{re.escape(prefix)}[A-Z0-9]{{{min_l},{max_l}}}$"
-        # Sin prefijo común: alternancia de sufijos únicos
-        unique = sorted(set(values))
-        if len(unique) <= 20:
-            return "^(" + "|".join(re.escape(v) for v in unique) + ")$"
-        lens = set(len(v) for v in unique)
-        if len(lens) == 1:
-            return f"^[A-Z0-9]{{{list(lens)[0]}}}$"
-        return f"^[A-Z0-9]{{{min(lens)},{max(lens)}}}$"
+
+        if not prefix or len(prefix) < 3:
+            # Sin prefijo común suficiente: alternativas completas
+            if len(values) <= 5:
+                return f"^({'|'.join(re.escape(v) for v in values)})$"
+            return f"^({'|'.join(re.escape(v) for v in values[:5])}|...)$"
+
+        # Función auxiliar para truncar prefijo en un delimitador significativo
+        def truncate_at_last_delimiter(text):
+            """Trunca el texto en un delimitador significativo (prioriza %, luego otros)"""
+            # Primero buscar el segundo '%' si existe (patrón común en estos datos)
+            percent_positions = [i for i, char in enumerate(text) if char == '%']
+            if len(percent_positions) >= 2:
+                return text[:percent_positions[1] + 1]
+            elif len(percent_positions) == 1:
+                return text[:percent_positions[0] + 1]
+
+            # Si no hay '%', buscar el último delimitador no alfanumérico
+            for i in range(len(text) - 1, -1, -1):
+                if not text[i].isalnum():
+                    return text[:i + 1]
+            return text
+
+        # Analizar la parte variable después del prefijo
+        suffixes = [v[len(prefix):] for v in values]
+
+        # Encontrar longitud común de sufijos
+        suffix_lengths = [len(s) for s in suffixes]
+        if len(set(suffix_lengths)) == 1:
+            # Todos tienen la misma longitud: buscar variaciones
+            common_length = suffix_lengths[0]
+
+            # Buscar dónde empiezan las variaciones
+            variation_start = None
+            for i in range(min(len(s) for s in suffixes)):
+                chars_at_i = set(s[i] if i < len(s) else '' for s in suffixes)
+                if len(chars_at_i) > 1:
+                    variation_start = i
+                    break
+
+            # Si encontramos variaciones, extraerlas inteligentemente
+            if variation_start is not None:
+                # Calcular posición absoluta de la variación en la cadena completa
+                abs_variation_pos = len(prefix) + variation_start
+                total_length = len(values[0])
+
+                # Solo extraer variaciones si están en el primer 40% de la cadena
+                # (evita patrones complejos cuando las variaciones están muy adelante)
+                if abs_variation_pos > total_length * 0.4:
+                    # Variación muy adelante: usar patrón genérico truncado
+                    truncated_prefix = truncate_at_last_delimiter(prefix)
+                    new_suffix_length = common_length + (len(prefix) - len(truncated_prefix))
+                    return f"^{re.escape(truncated_prefix)}[-A-Z0-9]{{{new_suffix_length}}}$"
+
+                before_var = suffixes[0][:variation_start] if variation_start > 0 else ""
+
+                # Buscar hasta dónde llega la variación (siguiente carácter común)
+                variation_end = variation_start + 1
+                for i in range(variation_start + 1, common_length):
+                    chars_at_i = set(s[i] if i < len(s) else '' for s in suffixes)
+                    if len(chars_at_i) > 1:
+                        variation_end = i + 1
+                    else:
+                        break
+
+                # Extraer las variaciones únicas
+                variations = sorted(set(s[variation_start:variation_end] for s in suffixes))
+
+                # Solo crear patrón específico si hay pocas variaciones (2-5)
+                if 2 <= len(variations) <= 5 and all(v for v in variations):
+                    # Buscar el PRIMER delimitador común después de la variación
+                    # Solo incluir UN delimitador (%, -, etc.)
+                    common_after = ""
+                    if variation_end < common_length:
+                        chars_at_i = set(s[variation_end] if variation_end < len(s) else '' for s in suffixes)
+                        if len(chars_at_i) == 1:
+                            char = suffixes[0][variation_end]
+                            # Solo incluir si es un delimitador especial (no alfanumérico)
+                            if not char.isalnum():
+                                common_after = char
+
+                    # Si no hay delimitador después de la variación, usar patrón genérico truncado
+                    # (las variaciones sin delimitador son menos útiles de extraer)
+                    if not common_after:
+                        truncated_prefix = truncate_at_last_delimiter(prefix)
+                        new_suffix_length = common_length + (len(prefix) - len(truncated_prefix))
+                        return f"^{re.escape(truncated_prefix)}[-A-Z0-9]{{{new_suffix_length}}}$"
+
+                    common_after_len = len(common_after)
+                    remaining_chars = common_length - variation_end - common_after_len
+
+                    # Construir patrón con variaciones específicas
+                    pattern_parts = [f"^{re.escape(prefix)}"]
+                    if before_var:
+                        pattern_parts.append(re.escape(before_var))
+                    pattern_parts.append(f"({'|'.join(re.escape(v) for v in variations)})")
+                    if common_after:
+                        pattern_parts.append(re.escape(common_after))
+                    if remaining_chars > 0:
+                        pattern_parts.append(f"[-A-Z0-9]{{{remaining_chars}}}")
+                    pattern_parts.append("$")
+
+                    return "".join(pattern_parts)
+
+            # Si no se pudo detectar variación específica: patrón genérico truncado
+            truncated_prefix = truncate_at_last_delimiter(prefix)
+            new_suffix_length = common_length + (len(prefix) - len(truncated_prefix))
+            return f"^{re.escape(truncated_prefix)}[-A-Z0-9]{{{new_suffix_length}}}$"
+
+        # Longitudes diferentes: usar patrón flexible truncado
+        truncated_prefix = truncate_at_last_delimiter(prefix)
+        min_len = min(suffix_lengths) + (len(prefix) - len(truncated_prefix))
+        max_len = max(suffix_lengths) + (len(prefix) - len(truncated_prefix))
+        if min_len == max_len:
+            return f"^{re.escape(truncated_prefix)}[-A-Z0-9]{{{min_len}}}$"
+        else:
+            return f"^{re.escape(truncated_prefix)}[-A-Z0-9]{{{min_len},{max_len}}}$"
 
     def _copy_regex(self):
         text = self.regex_text.toPlainText().strip()
