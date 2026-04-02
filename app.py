@@ -2,6 +2,8 @@
 app.py — CSV Processor · PyQt6
 """
 
+__version__ = "3.0.0"
+
 import os
 import sys
 import subprocess
@@ -2696,7 +2698,7 @@ class MainWindow(QMainWindow):
         self._rename_map: dict = {}
         self._loader: FileLoaderWorker | None = None
 
-        self.setWindowTitle("CSV Processor")
+        self.setWindowTitle(f"CSV Processor v{__version__}")
         self.resize(1280, 780)
         self.setMinimumSize(1000, 660)
 
