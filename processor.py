@@ -193,17 +193,15 @@ def get_unique_column_values(
             filepath,
             sep=delimiter,
             encoding=encoding,
-            chunksize=25_000,
-            usecols=[column],      # leer solo la columna necesaria (más eficiente)
+            chunksize=100_000,
+            usecols=[column],
             dtype=str,
             on_bad_lines="skip",
             engine="python",
         )
         for chunk in chunk_iter:
-            for val in chunk[column].fillna(""):
-                v = str(val).strip()
-                if v:
-                    seen.add(v)
+            vals = chunk[column].dropna().str.strip().unique()
+            seen.update(v for v in vals if v)
     finally:
         if chunk_iter is not None:
             chunk_iter.close()
@@ -237,7 +235,7 @@ def collect_rows_by_group(
             filepath,
             sep=delimiter,
             encoding=encoding,
-            chunksize=25_000,
+            chunksize=100_000,
             dtype=str,
             on_bad_lines="skip",
             engine="python",
@@ -246,15 +244,18 @@ def collect_rows_by_group(
             chunk = chunk.fillna("")
             if group_column not in chunk.columns:
                 continue
-            # Solo las columnas solicitadas que existen en este chunk
             available = [c for c in columns_to_read if c in chunk.columns]
             key_map   = {c: _key(c) for c in available}
             for seg_val, group_df in chunk.groupby(group_column, sort=False):
                 seg_val = str(seg_val).strip()
                 if not seg_val:
                     continue
-                sub     = group_df[available].rename(columns=key_map)
-                records = sub.to_dict(orient="records")
+                cols   = group_df[available]
+                # itertuples es 10x más rápido que to_dict(orient="records")
+                records = [
+                    {key_map[available[i]]: v for i, v in enumerate(row)}
+                    for row in cols.itertuples(index=False, name=None)
+                ]
                 groups.setdefault(seg_val, []).extend(records)
     finally:
         if chunk_iter is not None:
@@ -289,7 +290,7 @@ def collect_rows_by_two_groups(
             filepath,
             sep=delimiter,
             encoding=encoding,
-            chunksize=25_000,
+            chunksize=100_000,
             dtype=str,
             on_bad_lines="skip",
             engine="python",
@@ -308,8 +309,11 @@ def collect_rows_by_two_groups(
                     file_val = str(file_val).strip()
                     if not file_val:
                         continue
-                    sub     = file_df[available].rename(columns=key_map)
-                    records = sub.to_dict(orient="records")
+                    cols    = file_df[available]
+                    records = [
+                        {key_map[available[i]]: v for i, v in enumerate(row)}
+                        for row in cols.itertuples(index=False, name=None)
+                    ]
                     result.setdefault(folder_val, {}).setdefault(file_val, []).extend(records)
     finally:
         if chunk_iter is not None:
@@ -382,7 +386,6 @@ def search_values_in_csv(
     results: list[dict] = []
     chunk_iter = None
 
-    # Crear set de valores en minúsculas para búsqueda rápida
     search_set = {v.strip().lower() for v in search_values}
 
     try:
@@ -390,33 +393,41 @@ def search_values_in_csv(
             filepath,
             sep=delimiter,
             encoding=encoding,
-            chunksize=25_000,
+            chunksize=100_000,
             dtype=str,
             on_bad_lines="skip",
             engine="python",
         )
-        basename = Path(filepath).name
+        basename    = Path(filepath).name
+        row_offset  = 1   # +1 por la cabecera
 
         for chunk in chunk_iter:
             if cancel_fn and cancel_fn():
                 break
+
+            chunk_len = len(chunk)
             chunk = chunk.fillna("")
+
             if search_column not in chunk.columns:
+                row_offset += chunk_len
                 continue
 
-            # Buscar todos los valores en una sola pasada usando isin()
             chunk_lower = chunk[search_column].str.strip().str.lower()
-            mask = chunk_lower.isin(search_set)
-            matched = chunk[mask]
+            mask        = chunk_lower.isin(search_set)
+            matched     = chunk[mask]
 
-            if columns_to_read:
-                avail = [c for c in columns_to_read if c in matched.columns]
-                matched = matched[avail]
+            if not matched.empty:
+                if columns_to_read:
+                    avail   = [c for c in columns_to_read if c in matched.columns]
+                    matched = matched[avail]
 
-            for orig_idx, row in matched.iterrows():
-                rec = {"_file": basename, "_row": orig_idx + 2}
-                rec.update(row.to_dict())
-                results.append(rec)
+                col_names = list(matched.columns)
+                for pos, row in zip(matched.index, matched.itertuples(index=False, name=None)):
+                    rec = {"_file": basename, "_row": pos + 2}
+                    rec.update(zip(col_names, row))
+                    results.append(rec)
+
+            row_offset += chunk_len
 
     finally:
         if chunk_iter is not None:
@@ -444,23 +455,23 @@ def get_unique_values_by_group(
             filepath,
             sep=delimiter,
             encoding=encoding,
-            chunksize=25_000,
-            usecols=[group_column, value_column],   # solo las dos columnas necesarias
+            chunksize=100_000,
+            usecols=[group_column, value_column],
             dtype=str,
             on_bad_lines="skip",
             engine="python",
         )
         for chunk in chunk_iter:
             chunk = chunk.fillna("")
-            for g, v in zip(chunk[group_column], chunk[value_column]):
+            for g, grp in chunk.groupby(group_column, sort=False):
                 g = str(g).strip()
-                v = str(v).strip()
-                if g and v:
-                    groups.setdefault(g, set()).add(v)
+                if not g:
+                    continue
+                vals = grp[value_column].str.strip().unique()
+                groups.setdefault(g, set()).update(v for v in vals if v)
     finally:
         if chunk_iter is not None:
             chunk_iter.close()
-    # Devolver con valores ordenados dentro de cada grupo
     return {g: sorted(vals) for g, vals in sorted(groups.items())}
 
 
@@ -845,7 +856,7 @@ def add_column_to_csv(
             filepath,
             sep=delimiter,
             encoding=encoding,
-            chunksize=25_000,
+            chunksize=100_000,
             dtype=str,
             on_bad_lines="skip",
             engine="python",

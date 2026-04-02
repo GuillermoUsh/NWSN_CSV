@@ -5,6 +5,7 @@ app.py — CSV Processor · PyQt6
 import os
 import sys
 import subprocess
+import tempfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
@@ -32,6 +33,22 @@ from processor import (
     sanitize_filename, process_csv, search_value_in_csv, search_values_in_csv,
 )
 
+# ── Flechas SVG para QComboBox::down-arrow ────────────────────────────────────
+
+def _write_arrow_svg(color: str) -> str:
+    svg = (
+        f'<svg xmlns="http://www.w3.org/2000/svg" width="10" height="6">'
+        f'<polygon points="0,0 10,0 5,6" fill="{color}"/>'
+        f'</svg>'
+    )
+    f = tempfile.NamedTemporaryFile(suffix=".svg", delete=False, mode="w", encoding="utf-8")
+    f.write(svg)
+    f.close()
+    return f.name.replace("\\", "/")
+
+_ARROW_DARK  = _write_arrow_svg("#9ca3af")   # text_muted modo oscuro
+_ARROW_LIGHT = _write_arrow_svg("#64748b")   # text_muted modo claro
+
 # ── Constantes ────────────────────────────────────────────────────────────────
 
 PRESET_COLUMNS   = ["PHONEMODEL_NAME", "SN", "KEYUNITBARCODE", "CLASSCODE", "CREATETIME", "KEYMATERIAL"]
@@ -55,6 +72,16 @@ SEARCH_FILE_PALETTE = [
 ]
 PREVIEW_ROWS  = 2000   # filas cargadas en memoria para el preview
 PAGE_SIZE     = 200    # filas visibles por página
+
+# Mapeo canónico para SearchTab/SearchWorker: (nombre_final, [candidatos en prioridad])
+SEARCH_PRESET_CANONICAL = [
+    ("PHONEMODEL_NAME", ["PHONEMODEL_NAME", "PHONE_MODEL", "MODEL_NAME", "MODEL", "PHONEMODEL"]),
+    ("SN",              ["SN", "STR_PSN_1", "SN_1", "PSN", "SERIAL"]),
+    ("KEYUNITBARCODE",  ["KEYUNITBARCODE"]),
+    ("CLASSCODE",       ["CLASSCODE"]),
+    ("CREATETIME",      ["CREATETIME"]),
+    ("KEYMATERIAL",     ["KEYMATERIAL"]),
+]
 
 # ── Paletas ───────────────────────────────────────────────────────────────────
 
@@ -82,6 +109,7 @@ LIGHT = {
 # ── Helpers de estilo ─────────────────────────────────────────────────────────
 
 def app_stylesheet(p: dict) -> str:
+    arrow_path = _ARROW_DARK if p.get("bg") == DARK["bg"] else _ARROW_LIGHT
     return f"""
     QWidget {{ background-color: {p['bg']}; color: {p['text']}; font-family: "Segoe UI"; font-size: 10pt; }}
     QTabWidget::pane {{ border: 1px solid {p['border']}; border-radius: 4px; }}
@@ -104,7 +132,14 @@ def app_stylesheet(p: dict) -> str:
         background-color: {p['input_bg']}; color: {p['text']};
         border: 1px solid {p['border']}; border-radius: 4px; padding: 4px 8px; }}
     QLineEdit:focus, QPlainTextEdit:focus, QTextEdit:focus {{ border-color: {p['accent']}; }}
-    QComboBox::drop-down {{ border: none; width: 20px; }}
+    QComboBox::drop-down {{
+        border-left: 1px solid {p['border']};
+        width: 22px;
+        background: {p['surface2']};
+        border-top-right-radius: 3px;
+        border-bottom-right-radius: 3px;
+    }}
+    QComboBox::down-arrow {{ image: url("{arrow_path}"); width: 10px; height: 6px; }}
     QComboBox QAbstractItemView {{ background: {p['surface']}; color: {p['text']};
                                     selection-background-color: {p['accent']}; border: 1px solid {p['border']}; }}
     QCheckBox {{ color: {p['text']}; spacing: 6px; }}
@@ -132,7 +167,8 @@ def app_stylesheet(p: dict) -> str:
     QScrollArea {{ border: none; background: transparent; }}
     QScrollArea > QWidget > QWidget {{ background: transparent; }}
     QWidget#ColumnPanel, QWidget#SearchFilesPanel {{ background-color: {p['panel_bg']}; }}
-    """
+    QToolButton#btn_theme {{ font-size: 20pt; font-family: "Segoe UI Symbol"; }}
+"""
 
 def table_stylesheet(p: dict) -> str:
     return f"""
@@ -208,12 +244,15 @@ class SearchWorker(QThread):
     error     = pyqtSignal(str)
     cancelled = pyqtSignal()
 
-    def __init__(self, files: list, values: list, search_col: str):
+    def __init__(self, files: list, values: list, col_candidates: list,
+                 preset_canonical: list, extra_maps: dict = None):
         super().__init__()
-        self._files      = files
-        self._values     = values
-        self._search_col = search_col
-        self._cancel     = False
+        self._files            = files
+        self._values           = values
+        self._col_candidates   = col_candidates    # sinónimos de la columna seleccionada
+        self._preset_canonical = preset_canonical  # [(canonical, [candidatos]), ...]
+        self._extra_maps       = extra_maps or {}  # {filepath: {actual: canonical}}
+        self._cancel           = False
 
     def cancel(self): self._cancel = True
 
@@ -244,21 +283,53 @@ class SearchWorker(QThread):
             enc   = detect_encoding(filepath)
             delim = detect_delimiter(filepath, enc)
             cols  = get_columns(filepath, enc, delim)
-            # resolver columna de búsqueda
-            col = self._search_col
-            if col not in cols:
-                col = next((c for c in cols if self._search_col.lower() in c.lower()), None)
+            cols_set = set(cols)
+
+            # Mapas extra definidos por el usuario para este archivo
+            extra = self._extra_maps.get(filepath, {})  # {actual: canonical}
+
+            # Resolver columna de búsqueda:
+            # 1. Buscar en candidatos conocidos
+            # 2. Fallback: buscar en mapas extra del usuario
+            col = next((c for c in self._col_candidates if c in cols_set), None)
+            if col is None:
+                # Buscar si el usuario mapeó alguna col a la canonical buscada
+                canonical_target = self._col_candidates[0]  # primera = nombre canónico
+                col = next(
+                    (actual for actual, canon in extra.items() if canon == canonical_target),
+                    None
+                )
             if col is None:
                 return [], filepath
+
             rows = search_values_in_csv(filepath, enc, delim, col, self._values)
+            if not rows:
+                return [], filepath
+
+            # Construir mapa de normalización completo:
+            # a) Candidatos conocidos que difieren del canónico
+            rename = {}
+            for canonical, candidates in self._preset_canonical:
+                for c in candidates:
+                    if c in cols_set and c != canonical:
+                        rename[c] = canonical
+                        break
+            # b) Mapas extra del usuario (prioridad sobre los automáticos)
+            rename.update(extra)
+
             palette_idx = file_idx % len(SEARCH_FILE_PALETTE)
+            basename    = Path(filepath).name
             for row in rows:
-                row["__file__"]    = Path(filepath).name
+                if rename:
+                    for actual, canon in list(rename.items()):
+                        if actual in row:
+                            row[canon] = row.pop(actual)
+                row["__file__"]     = basename
                 row["__filepath__"] = filepath
-                row["__palette__"] = palette_idx
+                row["__palette__"]  = palette_idx
             return rows, filepath
-        except Exception as e:
-            return [], filepath  # el worker principal captura y emite error
+        except Exception:
+            return [], filepath
 
 
 
@@ -594,6 +665,69 @@ class ColumnPanel(QWidget):
             mapped = self._rename_map.get(col, col)
             cb.setChecked(mapped in PRESET_COLUMNS or col in PRESET_COLUMNS)
 
+# ── Diálogo de mapeo de columnas ─────────────────────────────────────────────
+
+class ColumnMappingDialog(QDialog):
+    """
+    Permite al usuario mapear columnas del archivo a los nombres canónicos de preset
+    cuando el archivo no tiene ninguno de los candidatos conocidos para ese preset.
+    """
+    def __init__(self, filename: str, missing: list[str], available_cols: list[str], parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(f"Mapeo de columnas")
+        self.setMinimumWidth(460)
+        self._combos: dict[str, QComboBox] = {}   # {canonical: combo}
+
+        layout = QVBoxLayout(self)
+        layout.setSpacing(12)
+
+        info = QLabel(
+            f"<b>{filename}</b> no tiene algunas columnas conocidas.<br>"
+            f"Seleccioná con qué columna del archivo corresponde cada una:"
+        )
+        info.setWordWrap(True)
+        layout.addWidget(info)
+
+        grid = QGridLayout()
+        grid.setHorizontalSpacing(16)
+        grid.setVerticalSpacing(8)
+        options = ["(omitir)"] + available_cols
+
+        for row, canonical in enumerate(missing):
+            lbl = QLabel(f"<b>{canonical}</b>")
+            combo = QComboBox()
+            combo.addItems(options)
+            combo.setMinimumWidth(220)
+            grid.addWidget(lbl,  row, 0, Qt.AlignmentFlag.AlignRight)
+            grid.addWidget(combo, row, 1)
+            self._combos[canonical] = combo
+
+        layout.addLayout(grid)
+        layout.addWidget(hline())
+
+        btn_row = QHBoxLayout()
+        btn_skip = QPushButton("Omitir todo")
+        btn_ok   = QPushButton("Aceptar")
+        btn_ok.setObjectName("accent")
+        btn_ok.setFixedHeight(34)
+        btn_skip.setFixedHeight(34)
+        btn_skip.clicked.connect(self.reject)
+        btn_ok.clicked.connect(self.accept)
+        btn_row.addStretch()
+        btn_row.addWidget(btn_skip)
+        btn_row.addWidget(btn_ok)
+        layout.addLayout(btn_row)
+
+    def get_mapping(self) -> dict[str, str]:
+        """Retorna {col_real_del_archivo: nombre_canonico} para las selecciones no omitidas."""
+        result = {}
+        for canonical, combo in self._combos.items():
+            selected = combo.currentText()
+            if selected != "(omitir)":
+                result[selected] = canonical
+        return result
+
+
 # ── Panel izquierdo: Archivos de búsqueda ────────────────────────────────────
 
 class SearchFilesPanel(QWidget):
@@ -604,6 +738,7 @@ class SearchFilesPanel(QWidget):
         self.setFixedWidth(270)
         self.setObjectName("SearchFilesPanel")
         self._files: list[str] = []
+        self._file_extra_maps: dict[str, dict[str, str]] = {}  # filepath → {actual: canonical}
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(8, 8, 8, 8)
@@ -635,22 +770,50 @@ class SearchFilesPanel(QWidget):
         layout.addWidget(scroll, stretch=1)
 
     def get_files(self) -> list: return list(self._files)
+    def get_extra_maps(self) -> dict: return dict(self._file_extra_maps)
 
     def _add_files(self):
         paths, _ = QFileDialog.getOpenFileNames(self, "Agregar CSVs", "", "CSV (*.csv);;Todos (*)")
         for p in paths:
             if p not in self._files:
                 self._files.append(p)
+                self._check_and_map(p)
         self._render()
         self.files_changed.emit()
 
+    def _check_and_map(self, filepath: str):
+        """Detecta columnas preset faltantes y muestra diálogo de mapeo si es necesario."""
+        try:
+            enc   = detect_encoding(filepath)
+            delim = detect_delimiter(filepath, enc)
+            cols  = get_columns(filepath, enc, delim)
+            cols_set = set(cols)
+
+            missing = [
+                canonical
+                for canonical, candidates in SEARCH_PRESET_CANONICAL
+                if not any(c in cols_set for c in candidates)
+            ]
+            if not missing:
+                return
+
+            dlg = ColumnMappingDialog(Path(filepath).name, missing, cols, self)
+            if dlg.exec():
+                mapping = dlg.get_mapping()  # {col_real: canonical}
+                if mapping:
+                    self._file_extra_maps[filepath] = mapping
+        except Exception:
+            pass
+
     def _clear(self):
         self._files.clear()
+        self._file_extra_maps.clear()
         self._render()
         self.files_changed.emit()
 
     def _remove(self, path: str):
         self._files = [f for f in self._files if f != path]
+        self._file_extra_maps.pop(path, None)
         self._render()
         self.files_changed.emit()
 
@@ -665,9 +828,13 @@ class SearchFilesPanel(QWidget):
             lbl = QLabel(Path(fp).name)
             lbl.setToolTip(fp)
             lbl.setWordWrap(False)
-            btn_x = QPushButton("✕")
+            btn_x = QLabel("✕")
             btn_x.setFixedSize(22, 22)
-            btn_x.clicked.connect(lambda _, f=fp: self._remove(f))
+            btn_x.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            btn_x.setStyleSheet("color: #f87171; font-weight: bold; font-size: 13pt;")
+            btn_x.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+            btn_x.setToolTip("Quitar de la lista")
+            btn_x.mousePressEvent = lambda e, f=fp: self._remove(f)
             row_h.addWidget(lbl, stretch=1)
             row_h.addWidget(btn_x)
             self._list_layout.insertWidget(self._list_layout.count() - 1, row_w)
@@ -1546,7 +1713,15 @@ class SearchTab(QWidget):
 
         self.exp_progress = ProgressRow(); layout.addWidget(self.exp_progress)
 
-    _SN_CANDIDATES = ["SN", "STR_PSN_1", "SN_1", "PSN", "SERIAL"]
+    _PRESET_CANONICAL = SEARCH_PRESET_CANONICAL
+    _CANONICAL_SET    = {canon for canon, _ in SEARCH_PRESET_CANONICAL}
+
+    def _col_to_canonical(self, col: str) -> str:
+        """Devuelve el nombre canónico de una columna, o la columna misma si no mapea a ningún preset."""
+        for canonical, candidates in self._PRESET_CANONICAL:
+            if col in candidates:
+                return canonical
+        return col
 
     def set_columns(self, columns: list):
         self._all_detected_cols = columns
@@ -1556,15 +1731,14 @@ class SearchTab(QWidget):
         self.combo_col.blockSignals(True)
         self.combo_col.clear()
         self.combo_col.addItems(columns)
-        for c in self._SN_CANDIDATES:
-            if c in columns:
-                self.combo_col.setCurrentText(c)
-                break
+        if "SN" in columns:
+            self.combo_col.setCurrentText("SN")
         self.combo_col.blockSignals(False)
 
     def _on_files_changed(self):
-        """Actualiza el combo de columna con la unión de columnas de todos los archivos del panel."""
-        files = self._files_panel.get_files()
+        """Actualiza el combo con columnas en forma canónica (unión de todos los archivos)."""
+        files      = self._files_panel.get_files()
+        extra_maps = self._files_panel.get_extra_maps()  # {filepath: {actual: canonical}}
         if not files:
             self._all_detected_cols = []
             self.combo_col.clear()
@@ -1575,27 +1749,24 @@ class SearchTab(QWidget):
             try:
                 enc   = detect_encoding(fp)
                 delim = detect_delimiter(fp, enc)
+                file_extra = extra_maps.get(fp, {})  # {actual: canonical}
                 for c in get_columns(fp, enc, delim):
-                    if c not in seen:
-                        seen.add(c)
-                        all_cols.append(c)
+                    # Primero intentar mapa extra del usuario, luego auto-detección
+                    canonical = file_extra.get(c) or self._col_to_canonical(c)
+                    if canonical not in seen:
+                        seen.add(canonical)
+                        all_cols.append(canonical)
             except Exception:
                 pass
         self._all_detected_cols = all_cols
         self._refresh_col_combo()
 
-    # Todos los nombres conocidos que consideramos "preseleccionados" para buscar
-    _PRESET_SEARCH_COLS = set(PRESET_COLUMNS) | {
-        "STR_PSN_1", "SN_1", "PSN", "SERIAL",
-        "PHONE_MODEL", "MODEL_NAME", "MODEL", "PHONEMODEL",
-    }
-
     def _refresh_col_combo(self):
-        """Filtra el combo según el radio activo: preset o todas."""
+        """Filtra el combo según el radio activo: preset (canónicos) o todas."""
         if not self._all_detected_cols:
             return
         if self.rb_cols_preset.isChecked():
-            cols = [c for c in self._all_detected_cols if c in self._PRESET_SEARCH_COLS]
+            cols = [c for c in self._all_detected_cols if c in self._CANONICAL_SET]
             if not cols:
                 cols = self._all_detected_cols
         else:
@@ -1615,9 +1786,15 @@ class SearchTab(QWidget):
         if not values:
             QMessageBox.warning(self, "Sin valor", "Ingresá al menos un valor a buscar."); return
         col = self.combo_col.currentText()
+        # Buscar la lista de candidatos para la columna seleccionada
+        col_candidates = next(
+            (candidates for canonical, candidates in self._PRESET_CANONICAL if canonical == col),
+            [col]   # si no es canónica, buscar solo por ese nombre
+        )
         self._last_searched = values
         self.txt_not_found.clear()
-        self._worker = SearchWorker(files, values, col)
+        extra_maps = self._files_panel.get_extra_maps()
+        self._worker = SearchWorker(files, values, col_candidates, self._PRESET_CANONICAL, extra_maps)
         self._worker.progress.connect(self._on_progress)
         self._worker.done.connect(self._on_done)
         self._worker.error.connect(self._on_error)
@@ -1687,7 +1864,16 @@ class SearchTab(QWidget):
             self._result_row_colors = []
             return
         skip = {"__file__", "__filepath__", "__palette__"}
-        data_cols = [k for k in results[0] if k not in skip]
+
+        # Recolectar columnas de TODOS los resultados (no solo el primero)
+        seen_cols: set = set()
+        data_cols: list = []
+        for r in results:
+            for k in r:
+                if k not in skip and k not in seen_cols:
+                    seen_cols.add(k)
+                    data_cols.append(k)
+
         rows_data  = []
         row_colors = []
         for r in results:
@@ -1812,8 +1998,6 @@ class SearchTab(QWidget):
 
     def apply_palette(self, p: dict):
         self.table.apply_palette(p)
-        if self._result_df is not None and not self._result_df.empty:
-            self.table.table.view.model().sourceModel().update_palette(p)
         # Re-aplicar color de txt_not_found con el nuevo tema
         text = self.txt_not_found.toPlainText()
         if text:
@@ -2052,6 +2236,10 @@ class AddColumnTab(QWidget):
     def _open_dest(self):
         if self._last_dir and os.path.isdir(self._last_dir): os.startfile(self._last_dir)
 
+    def apply_palette(self, p: dict):
+        self._palette = p
+        self.table.apply_palette(p)
+
 # ── Tab: Part Name ────────────────────────────────────────────────────────────
 
 class PartNameTab(QWidget):
@@ -2061,9 +2249,22 @@ class PartNameTab(QWidget):
         self._palette: dict = {}
         self._current_regex: str = ""
 
-        layout = QVBoxLayout(self)
+        # Layout externo sin márgenes — el scroll area ocupa todo
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+
+        # Scroll area que envuelve todo el contenido del tab
+        tab_scroll = QScrollArea()
+        tab_scroll.setWidgetResizable(True)
+        tab_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        outer.addWidget(tab_scroll)
+
+        container = QWidget()
+        layout = QVBoxLayout(container)
         layout.setContentsMargins(12, 12, 12, 12)
         layout.setSpacing(8)
+        tab_scroll.setWidget(container)
 
         row1 = QHBoxLayout()
         row1.addWidget(QLabel("CLASSCODE:"))
@@ -2075,7 +2276,7 @@ class PartNameTab(QWidget):
 
         # Warning label para validación PHONEMODEL_NAME
         self.lbl_phonemodel_warning = QLabel("")
-        self.lbl_phonemodel_warning.setFont(QFont("Segoe UI", 9))
+        self.lbl_phonemodel_warning.setFont(QFont("Segoe UI", 10))
         self.lbl_phonemodel_warning.setWordWrap(True)
         self.lbl_phonemodel_warning.setMinimumHeight(30)
         self.lbl_phonemodel_warning.setVisible(False)
@@ -2086,11 +2287,11 @@ class PartNameTab(QWidget):
         # RegEx header con botón copiar
         hdr_row = QHBoxLayout()
         self.lbl_regex = QLabel("RegEx para CLASSCODE: (Seleccioná un CLASSCODE y presioná 'Analizar')")
-        self.lbl_regex.setFont(QFont("Consolas", 9))
+        self.lbl_regex.setFont(QFont("Consolas", 10))
         self.lbl_regex.setWordWrap(True)
         self.lbl_regex.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
 
-        self.btn_copy_regex = QPushButton("📋  Copiar"); self.btn_copy_regex.setFixedHeight(28); self.btn_copy_regex.setFixedWidth(80)
+        self.btn_copy_regex = QPushButton("📋  Copiar"); self.btn_copy_regex.setFixedHeight(32); self.btn_copy_regex.setFixedWidth(90)
         self.btn_copy_regex.clicked.connect(self._copy_regex)
         self.btn_copy_regex.setEnabled(False)
 
@@ -2100,32 +2301,32 @@ class PartNameTab(QWidget):
 
         layout.addWidget(hline())
 
-        # Grilla de KEYUNITBARCODE (más grande ahora)
+        # Grilla de KEYUNITBARCODE
         layout.addWidget(QLabel("📋  KEYUNITBARCODE del CLASSCODE seleccionado:"))
         self.table_keyunit = DataTable()
-        self.table_keyunit.setFixedHeight(300)  # Reducido de 400 a 300 para que quepa todo
+        self.table_keyunit.setMinimumHeight(200)
         layout.addWidget(self.table_keyunit)
 
         layout.addWidget(hline())
 
         layout.addWidget(QLabel("📊  KEYMATERIAL (agrupados):"))
 
-        scroll = QScrollArea(); scroll.setWidgetResizable(True); scroll.setFixedHeight(150)  # Reducido de 180 a 150
-        self._mat_widget = QWidget(); self._mat_layout = QVBoxLayout(self._mat_widget)
-        self._mat_layout.setContentsMargins(4, 4, 4, 4); self._mat_layout.setSpacing(3)
+        self._mat_widget = QWidget()
+        self._mat_layout = QVBoxLayout(self._mat_widget)
+        self._mat_layout.setContentsMargins(4, 4, 4, 4)
+        self._mat_layout.setSpacing(4)
         self._mat_layout.addStretch()
-        scroll.setWidget(self._mat_widget)
-        layout.addWidget(scroll)
+        layout.addWidget(self._mat_widget)
 
-        self.lbl_stats = QLabel("Esperando análisis…")
-        self.lbl_stats.setFont(QFont("Segoe UI", 10))
-        self.lbl_stats.setStyleSheet("color: gray;")
-        layout.addWidget(self.lbl_stats)
         layout.addStretch()
 
-    def setup(self, df: pd.DataFrame, columns: list, palette: dict):
-        self._df = df
-        self._palette = palette
+    def setup(self, df: pd.DataFrame, columns: list, palette: dict,
+              filepath: str = "", enc: str = "", delim: str = ""):
+        self._df       = df
+        self._palette  = palette
+        self._filepath = filepath
+        self._enc      = enc
+        self._delim    = delim
 
         # Aplicar estilo inicial al label de RegEx según la paleta
         self.lbl_regex.setStyleSheet(
@@ -2142,135 +2343,158 @@ class PartNameTab(QWidget):
         if self._df is None: return
         code = self.combo_classcode.currentText()
         if not code: return
-        subset = self._df[self._df.get("CLASSCODE", pd.Series()) == code] if "CLASSCODE" in self._df.columns else self._df
 
-        # Mostrar grilla con KEYUNITBARCODE y PHONEMODEL_NAME
-        if "KEYUNITBARCODE" in self._df.columns:
-            # Crear DataFrame con las columnas relevantes
-            columns_to_show = ["PHONEMODEL_NAME", "KEYUNITBARCODE"]
-            if "KEYMATERIAL" in self._df.columns:
-                columns_to_show.append("KEYMATERIAL")
+        # Mapa de nombre-strip → nombre real en el DataFrame
+        col_map = {c.strip(): c for c in self._df.columns}
+        classcode_col   = col_map.get("CLASSCODE")
+        phonemodel_col  = col_map.get("PHONEMODEL_NAME")
+        keyunit_col     = col_map.get("KEYUNITBARCODE")
+        keymaterial_col = col_map.get("KEYMATERIAL")
 
-            available_cols = [col for col in columns_to_show if col in subset.columns]
-            df_display = subset[available_cols].copy()
+        # Filtrar subset por CLASSCODE
+        if classcode_col:
+            subset = self._df[self._df[classcode_col] == code]
+        else:
+            subset = self._df
 
-            # Mostrar en grilla
-            model = PandasTableModel(df_display, self._palette)
+        # Grilla: PHONEMODEL_NAME + KEYUNITBARCODE + KEYMATERIAL
+        show_cols = [c for c in [phonemodel_col, keyunit_col, keymaterial_col] if c]
+        if show_cols:
+            model = PandasTableModel(subset[show_cols].copy(), self._palette)
             self.table_keyunit.set_model(model)
             self.table_keyunit.apply_palette(self._palette)
 
-        # Validación PHONEMODEL_NAME y generación de RegEx
+        # Reset estado
         self.lbl_phonemodel_warning.setVisible(False)
         self.btn_copy_regex.setEnabled(False)
-        regex_values = []
-        process_cancelled = False
+        self._current_regex = ""
+        p = self._palette
 
-        # Limpiar nombres de columnas (por si tienen espacios)
-        df_columns = [col.strip() for col in self._df.columns]
-
-        if "PHONEMODEL_NAME" in df_columns and "KEYUNITBARCODE" in df_columns:
-            # Revisar TODOS los registros del CLASSCODE (no solo una muestra)
-            phonemodels = subset["PHONEMODEL_NAME"].dropna().unique().tolist()
-            print(f"[Part Name] Analizando {code}: {len(phonemodels)} PHONEMODEL_NAME únicos: {phonemodels}")
+        # Validación PHONEMODEL_NAME — leer archivo completo si está disponible
+        if phonemodel_col:
+            if self._filepath:
+                import csv as _csv
+                phonemodels_set = set()
+                try:
+                    with open(self._filepath, encoding=self._enc, newline="") as f:
+                        reader = _csv.DictReader(f, delimiter=self._delim)
+                        for row in reader:
+                            cc = row.get(classcode_col or "CLASSCODE", "").strip()
+                            pm = row.get(phonemodel_col, "").strip()
+                            if cc == code and pm:
+                                phonemodels_set.add(pm)
+                                if len(phonemodels_set) > 1:
+                                    break  # conflicto detectado, no seguir leyendo
+                except Exception:
+                    pass
+                phonemodels = list(phonemodels_set)
+            else:
+                phonemodels = subset[phonemodel_col].dropna().unique().tolist()
 
             if len(phonemodels) > 1:
-                # CANCELAR: múltiples PHONEMODEL_NAME detectados
                 models_str = ", ".join(str(m) for m in phonemodels)
                 self.lbl_phonemodel_warning.setText(
-                    f"❌  ERROR: Este CLASSCODE tiene múltiples PHONEMODEL_NAME: {models_str}\n"
-                    f"⚠️  Proceso cancelado. No se puede generar RegEx con modelos mezclados."
+                    f"⚠  CLASSCODE {code} tiene {len(phonemodels)} PHONEMODEL_NAME distintos: {models_str}\n"
+                    f"No se puede generar RegEx con modelos mezclados."
                 )
-                self.lbl_phonemodel_warning.setStyleSheet("color: #dc2626; background: #fee2e2; padding: 8px; border-radius: 4px; font-weight: 600;")
+                self.lbl_phonemodel_warning.setStyleSheet(
+                    f"color: {p['error']}; background: {p['surface2']}; "
+                    f"padding: 8px; border-radius: 4px; font-weight: 600;"
+                )
                 self.lbl_phonemodel_warning.setVisible(True)
-
-                # Actualizar label de RegEx
-                self.lbl_regex.setText(f"RegEx para {code}: ❌ PROCESO CANCELADO (modelos mezclados)")
+                self.lbl_regex.setText(f"RegEx para {code}: cancelado — modelos mezclados")
                 self.lbl_regex.setStyleSheet(
-                    f"padding: 6px; background: {self._palette['surface2']}; "
-                    f"border-radius: 4px; color: {self._palette['error']}; font-weight: 600;"
+                    f"padding: 6px; background: {p['surface2']}; "
+                    f"border-radius: 4px; color: {p['error']};"
                 )
-                process_cancelled = True
+                # Estadísticas y KEYMATERIAL igual se muestran
+                self._last_render = (subset, keymaterial_col, code)
+                self._render_keymaterial(subset, keymaterial_col, code)
+                return
 
             elif len(phonemodels) == 1:
-                # OK: un solo PHONEMODEL_NAME
-                print(f"[Part Name] ✓ Un solo modelo detectado: {phonemodels[0]}")
                 self.lbl_phonemodel_warning.setText(f"✓  PHONEMODEL_NAME: {phonemodels[0]}")
-                self.lbl_phonemodel_warning.setStyleSheet("color: #22c55e; background: #d1fae5; padding: 6px; border-radius: 4px;")
+                self.lbl_phonemodel_warning.setStyleSheet(
+                    f"color: {p['success']}; background: {p['surface2']}; "
+                    f"padding: 6px; border-radius: 4px;"
+                )
                 self.lbl_phonemodel_warning.setVisible(True)
-                self.lbl_phonemodel_warning.raise_()  # Traer al frente
-                print(f"[Part Name] Badge visible: {self.lbl_phonemodel_warning.isVisible()}, texto: '{self.lbl_phonemodel_warning.text()}'")
 
-                # Usar todos los KEYUNITBARCODE para el RegEx
-                regex_values = subset["KEYUNITBARCODE"].dropna().unique().tolist()
-            else:
-                # Sin PHONEMODEL_NAME: usar todos
-                regex_values = subset["KEYUNITBARCODE"].dropna().unique().tolist()
-        elif "KEYUNITBARCODE" in self._df.columns:
-            # Sin columna PHONEMODEL_NAME: usar todos
-            regex_values = subset["KEYUNITBARCODE"].dropna().unique().tolist()
-
-        # RegEx (solo si no se canceló el proceso)
-        if not process_cancelled:
+        # Generar RegEx
+        if keyunit_col:
+            regex_values = subset[keyunit_col].dropna().unique().tolist()
             if regex_values:
                 pattern = self._generate_regex(regex_values)
                 self.lbl_regex.setText(f"RegEx para {code}: {pattern}")
                 self.lbl_regex.setStyleSheet(
-                    f"padding: 6px; background: {self._palette['surface2']}; "
-                    f"border-radius: 4px; color: {self._palette['text']};"
+                    f"padding: 6px; background: {p['surface2']}; "
+                    f"border-radius: 4px; color: {p['text']};"
                 )
                 self.btn_copy_regex.setEnabled(True)
-                self._current_regex = pattern  # Guardar para copiar
-            elif "KEYUNITBARCODE" in self._df.columns:
-                self.lbl_regex.setText(f"RegEx para {code}: No hay KEYUNITBARCODE para generar RegEx")
-                self.lbl_regex.setStyleSheet(
-                    f"padding: 6px; background: {self._palette['surface2']}; "
-                    f"border-radius: 4px; color: {self._palette['warning']};"
-                )
+                self._current_regex = pattern
             else:
-                self.lbl_regex.setText(f"RegEx para {code}: Columna KEYUNITBARCODE no encontrada")
+                self.lbl_regex.setText(f"RegEx para {code}: sin KEYUNITBARCODE")
                 self.lbl_regex.setStyleSheet(
-                    f"padding: 6px; background: {self._palette['surface2']}; "
-                    f"border-radius: 4px; color: {self._palette['error']};"
+                    f"padding: 6px; background: {p['surface2']}; "
+                    f"border-radius: 4px; color: {p['warning']};"
                 )
+        else:
+            self.lbl_regex.setText(f"RegEx para {code}: columna KEYUNITBARCODE no encontrada")
+            self.lbl_regex.setStyleSheet(
+                f"padding: 6px; background: {p['surface2']}; "
+                f"border-radius: 4px; color: {p['error']};"
+            )
 
-        # KEYMATERIAL (nuevo formato con colores suaves)
+        self._last_render = (subset, keymaterial_col, code)
+        self._render_keymaterial(subset, keymaterial_col, code)
+
+    def _render_keymaterial(self, subset: pd.DataFrame, keymaterial_col: str | None, code: str):
         while self._mat_layout.count() > 1:
             item = self._mat_layout.takeAt(0)
             if item.widget(): item.widget().deleteLater()
+        if not keymaterial_col:
+            return
+        p = self._palette
+        counts = subset[keymaterial_col].value_counts().head(50)
+        font_row   = QFont("Segoe UI", 10)
+        font_total = QFont("Segoe UI", 11)
+        font_total.setBold(True)
+        for mat, cnt in counts.items():
+            row_w = QWidget(); row_h = QHBoxLayout(row_w)
+            row_h.setContentsMargins(4, 1, 4, 1); row_h.setSpacing(8)
+            lbl_pn  = QLabel("PN:")
+            lbl_pn.setFont(font_row)
+            lbl_pn.setStyleSheet(f"color: {p['text_muted']}; font-weight: 600;")
+            lbl_mat = QLabel(str(mat))
+            lbl_mat.setFont(font_row)
+            lbl_mat.setStyleSheet(f"color: {p['text']}; font-weight: 500;")
+            lbl_mat.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+            lbl_cc  = QLabel(f"{code}:")
+            lbl_cc.setFont(font_row)
+            lbl_cc.setStyleSheet(f"color: {p['accent']}; font-weight: 700;")
+            lbl_cnt = QLabel(f"[{cnt}]")
+            lbl_cnt.setFont(font_row)
+            lbl_cnt.setStyleSheet(f"color: {p['accent']}; font-weight: 600;")
+            lbl_cnt.setFixedWidth(55)
+            for w in (lbl_pn, lbl_mat, lbl_cc, lbl_cnt):
+                row_h.addWidget(w)
+            self._mat_layout.insertWidget(self._mat_layout.count() - 1, row_w)
 
-        if "KEYMATERIAL" in self._df.columns:
-            counts = subset["KEYMATERIAL"].value_counts().head(50)
-            for mat, cnt in counts.items():
-                row_w = QWidget(); row_h = QHBoxLayout(row_w); row_h.setContentsMargins(0, 0, 0, 0); row_h.setSpacing(4)
+        # Línea de totales al final
+        total_w = QWidget(); total_h = QHBoxLayout(total_w)
+        total_h.setContentsMargins(4, 6, 4, 2); total_h.setSpacing(6)
+        lbl_total = QLabel(f"{code}  —  {len(subset)} registros")
+        lbl_total.setFont(font_total)
+        lbl_total.setStyleSheet(f"color: {p['text']}; font-weight: 700;")
+        total_h.addWidget(lbl_total); total_h.addStretch()
+        self._mat_layout.insertWidget(self._mat_layout.count() - 1, total_w)
 
-                # Formato: PN: {material} CLASSCODE: {code} [{count}]
-                lbl_pn = QLabel("PN:")
-                lbl_pn.setStyleSheet("color: #6b7280; font-weight: 600;")
-
-                lbl_mat = QLabel(str(mat))
-                lbl_mat.setStyleSheet("color: #111827; font-weight: 500;")
-                lbl_mat.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
-
-                lbl_cc = QLabel("CLASSCODE:")
-                lbl_cc.setStyleSheet("color: #6b7280; font-weight: 600;")
-
-                lbl_code = QLabel(str(code))
-                lbl_code.setStyleSheet("color: #111827; font-weight: 500;")
-
-                lbl_cnt = QLabel(f"[{cnt}]")
-                lbl_cnt.setStyleSheet("color: #9ca3af; font-weight: 500;")
-                lbl_cnt.setFixedWidth(50)
-
-                row_h.addWidget(lbl_pn)
-                row_h.addWidget(lbl_mat)
-                row_h.addWidget(lbl_cc)
-                row_h.addWidget(lbl_code)
-                row_h.addWidget(lbl_cnt)
-
-                self._mat_layout.insertWidget(self._mat_layout.count() - 1, row_w)
-
-        desc = CLASS_CODE_MAP.get(code, code)
-        self.lbl_stats.setText(f"{desc}  ·  {len(subset)} registros")
+    def apply_palette(self, p: dict):
+        self._palette = p
+        self.table_keyunit.apply_palette(p)
+        if hasattr(self, "_last_render") and self._last_render is not None:
+            subset, keymaterial_col, code = self._last_render
+            self._render_keymaterial(subset, keymaterial_col, code)
 
     def _generate_regex(self, values: list) -> str:
         """Genera un patrón RegEx inteligente con variaciones específicas."""
@@ -2282,6 +2506,49 @@ class PartNameTab(QWidget):
         # Un solo valor: match exacto
         if len(values) == 1:
             return f"^{re.escape(values[0])}$"
+
+        # Caso especial: valores con 2+ signos %
+        # Descomponer en: antes_1er% | entre_%s | después_2do%
+        # Permite variaciones en el segmento central → (val1|val2)
+        def _split_at_percents(val):
+            p1 = val.find('%')
+            if p1 == -1: return None
+            p2 = val.find('%', p1 + 1)
+            if p2 == -1: return None
+            return val[:p1], val[p1 + 1:p2], val[p2 + 1:]
+
+        pct_parts = [_split_at_percents(v) for v in values]
+        if all(p is not None for p in pct_parts):
+            before_set = set(p[0] for p in pct_parts)
+            if len(before_set) == 1:
+                before   = pct_parts[0][0]
+                middles  = [p[1] for p in pct_parts]
+                suffixes = [p[2] for p in pct_parts]
+
+                # Prefijo común del segmento central
+                mid_prefix = middles[0]
+                for m in middles[1:]:
+                    while not m.startswith(mid_prefix) and mid_prefix:
+                        mid_prefix = mid_prefix[:-1]
+
+                mid_variants = sorted(set(m[len(mid_prefix):] for m in middles))
+
+                if len(mid_variants) == 1 and mid_variants[0] == "":
+                    # Todos los middles idénticos
+                    mid_regex = re.escape(mid_prefix)
+                elif len(mid_variants) <= 8 and all(len(v) <= 6 for v in mid_variants):
+                    # Pocas variaciones cortas → grupo explícito
+                    mid_regex = re.escape(mid_prefix) + \
+                                "(" + "|".join(re.escape(v) for v in mid_variants) + ")"
+                else:
+                    # Demasiadas variaciones → wildcard para el segmento central
+                    mid_len = len(middles[0]) - len(mid_prefix)
+                    mid_regex = re.escape(mid_prefix) + f"[-A-Z0-9]{{{mid_len}}}"
+
+                suf_lens = [len(s) for s in suffixes]
+                mn, mx = min(suf_lens), max(suf_lens)
+                suffix_part = f"{{{mn}}}" if mn == mx else f"{{{mn},{mx}}}"
+                return f"^{re.escape(before)}%{mid_regex}%[-A-Z0-9]{suffix_part}$"
 
         # Encontrar prefijo común
         prefix = values[0]
@@ -2459,7 +2726,8 @@ class MainWindow(QMainWindow):
         self._top_spacer = QWidget()
         self._top_spacer.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         self.btn_theme = QToolButton()
-        self.btn_theme.setText("☀")
+        self.btn_theme.setText("☽")
+        self.btn_theme.setObjectName("btn_theme")
         self.btn_theme.setFixedSize(36, 36)
         self.btn_theme.clicked.connect(self._toggle_theme)
         top_layout.addWidget(self.btn_open)
@@ -2564,7 +2832,7 @@ class MainWindow(QMainWindow):
         self.tab_addcol.setup(path, enc, delim, columns, self._p)
         self.tab_addcol.set_preview(df, self._p)
         self.tab_search.set_columns(columns)
-        self.tab_partname.setup(df, columns, self._p)
+        self.tab_partname.setup(df, columns, self._p, path, enc, delim)
 
         self.status.showMessage(f"Cargado: {path}", 4000)
 
@@ -2587,7 +2855,7 @@ class MainWindow(QMainWindow):
     def _toggle_theme(self):
         self._dark = not self._dark
         self._p    = DARK if self._dark else LIGHT
-        self.btn_theme.setText("☀" if self._dark else "🌙")
+        self.btn_theme.setText("☽" if self._dark else "☀")
         QApplication.instance().setProperty("dark_mode", self._dark)
         self._apply_palette()
 
@@ -2596,6 +2864,8 @@ class MainWindow(QMainWindow):
         QApplication.instance().setStyleSheet(app_stylesheet(p))
         self.tab_csv.apply_palette(p)
         self.tab_search.apply_palette(p)
+        self.tab_addcol.apply_palette(p)
+        self.tab_partname.apply_palette(p)
         if self._df_preview is not None:
             self._on_columns_changed()
 
