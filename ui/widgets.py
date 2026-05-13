@@ -6,12 +6,12 @@ from pathlib import Path
 
 import pandas as pd
 from PyQt6.QtCore import Qt, QAbstractTableModel, QModelIndex, QSortFilterProxyModel, pyqtSignal
-from PyQt6.QtGui import QColor, QFont, QKeySequence, QCursor
+from PyQt6.QtGui import QColor, QFont, QKeySequence, QCursor, QShortcut
 from PyQt6.QtWidgets import (
     QWidget, QDialog, QVBoxLayout, QHBoxLayout, QGridLayout,
     QScrollArea, QTableView, QHeaderView, QAbstractItemView,
     QLabel, QPushButton, QComboBox, QCheckBox, QProgressBar,
-    QFrame, QSizePolicy, QFileDialog, QShortcut, QApplication,
+    QFrame, QSizePolicy, QFileDialog, QApplication,
 )
 
 from constants import PRESET_COLUMNS, SEARCH_PRESET_CANONICAL

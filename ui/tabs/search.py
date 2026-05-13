@@ -6,12 +6,12 @@ import os
 from pathlib import Path
 
 import pandas as pd
-from PyQt6.QtCore import Qt, QKeySequence
-from PyQt6.QtGui import QFont, QCursor
+from PyQt6.QtCore import Qt
+from PyQt6.QtGui import QFont, QCursor, QKeySequence, QShortcut
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QComboBox, QPlainTextEdit, QRadioButton, QButtonGroup,
-    QShortcut, QMessageBox, QApplication,
+    QMessageBox, QApplication,
 )
 
 from constants import SEARCH_PRESET_CANONICAL, SEARCH_FILE_PALETTE
