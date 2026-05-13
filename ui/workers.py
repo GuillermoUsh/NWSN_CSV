@@ -10,6 +10,7 @@ from processor import (
     detect_encoding, detect_delimiter, get_columns, get_preview,
     process_csv, search_values_in_csv,
 )
+from typing import Callable
 from constants import PREVIEW_ROWS, SEARCH_FILE_PALETTE
 
 
@@ -161,6 +162,38 @@ class SearchWorker(QThread):
             return rows, filepath, ""
         except Exception as e:
             return [], filepath, f"⚠ Error en {Path(filepath).name}: {e}"
+
+
+class ColumnDetectWorker(QThread):
+    """Detecta encoding/delimitador/columnas de múltiples archivos en background."""
+    done  = pyqtSignal(list)   # list of canonical column names
+    error = pyqtSignal(str)
+
+    def __init__(self, files: list, col_to_canonical: Callable, extra_maps: dict):
+        super().__init__()
+        self._files           = files
+        self._col_to_canonical = col_to_canonical
+        self._extra_maps      = extra_maps
+
+    def run(self):
+        try:
+            seen: set     = set()
+            all_cols: list = []
+            for fp in self._files:
+                try:
+                    enc        = detect_encoding(fp)
+                    delim      = detect_delimiter(fp, enc)
+                    file_extra = self._extra_maps.get(fp, {})
+                    for c in get_columns(fp, enc, delim):
+                        canonical = file_extra.get(c) or self._col_to_canonical(c)
+                        if canonical not in seen:
+                            seen.add(canonical)
+                            all_cols.append(canonical)
+                except Exception:
+                    pass
+            self.done.emit(all_cols)
+        except Exception as e:
+            self.error.emit(str(e))
 
 
 class GenericWorker(QThread):

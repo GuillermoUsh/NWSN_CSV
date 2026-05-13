@@ -17,7 +17,7 @@ from PyQt6.QtWidgets import (
 from constants import SEARCH_PRESET_CANONICAL, SEARCH_FILE_PALETTE
 from processor import sanitize_filename
 from ui.theme import DARK, LIGHT
-from ui.workers import SearchWorker, GenericWorker
+from ui.workers import SearchWorker, GenericWorker, ColumnDetectWorker
 from ui.widgets import DataTable, PandasTableModel, ProgressRow, hline
 
 
@@ -34,6 +34,7 @@ class SearchTab(QWidget):
         self._last_export_dir = ""
         self._all_detected_cols: list = []
         self._search_warnings: list = []
+        self._col_detect_worker: ColumnDetectWorker | None = None
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(12, 10, 12, 10)
@@ -177,27 +178,25 @@ class SearchTab(QWidget):
         self.combo_col.blockSignals(False)
 
     def _on_files_changed(self):
-        from processor import detect_encoding, detect_delimiter, get_columns
-        files      = self._files_panel.get_files()
-        extra_maps = self._files_panel.get_extra_maps()
+        files = self._files_panel.get_files()
         if not files:
             self._all_detected_cols = []
             self.combo_col.clear()
             return
-        seen = set()
-        all_cols = []
-        for fp in files:
-            try:
-                enc   = detect_encoding(fp)
-                delim = detect_delimiter(fp, enc)
-                file_extra = extra_maps.get(fp, {})
-                for c in get_columns(fp, enc, delim):
-                    canonical = file_extra.get(c) or self._col_to_canonical(c)
-                    if canonical not in seen:
-                        seen.add(canonical)
-                        all_cols.append(canonical)
-            except Exception:
-                pass
+
+        # Cancelar detección previa si aún corre
+        if self._col_detect_worker and self._col_detect_worker.isRunning():
+            self._col_detect_worker.done.disconnect()
+            self._col_detect_worker.quit()
+
+        extra_maps = self._files_panel.get_extra_maps()
+        self._col_detect_worker = ColumnDetectWorker(
+            files, self._col_to_canonical, extra_maps
+        )
+        self._col_detect_worker.done.connect(self._on_cols_detected)
+        self._col_detect_worker.start()
+
+    def _on_cols_detected(self, all_cols: list):
         self._all_detected_cols = all_cols
         self._refresh_col_combo()
 

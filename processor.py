@@ -2,6 +2,7 @@
 processor.py — Lógica de procesamiento de archivos CSV grandes.
 """
 
+import os
 import re
 import csv
 import chardet
@@ -55,7 +56,7 @@ def get_columns(filepath: str, encoding: str, delimiter: str) -> list[str]:
     """Devuelve la lista de nombres de columnas del CSV sin leer los datos."""
     df = pd.read_csv(
         filepath, sep=delimiter, encoding=encoding,
-        nrows=0, on_bad_lines="skip", engine="python",
+        nrows=0, on_bad_lines="skip", engine="c",
     )
     return list(df.columns)
 
@@ -64,12 +65,12 @@ def get_preview(filepath: str, encoding: str, delimiter: str, nrows: int = 200) 
     """Devuelve las primeras N filas como DataFrame de strings (sin NaN)."""
     df = pd.read_csv(
         filepath, sep=delimiter, encoding=encoding,
-        nrows=nrows, on_bad_lines="skip", dtype=str, engine="python",
+        nrows=nrows, on_bad_lines="skip", dtype=str, engine="c",
     )
     return df.fillna("")
 
 
-# ─── Conteo de filas (para la barra de progreso) ──────────────────────────────
+# ─── Conteo / estimación de filas ────────────────────────────────────────────
 
 def count_rows_fast(filepath: str) -> int:
     """Cuenta líneas del archivo en binario (eficiente para 500k+ filas)."""
@@ -78,6 +79,24 @@ def count_rows_fast(filepath: str) -> int:
         for chunk in iter(lambda: f.read(1_048_576), b""):
             count += chunk.count(b"\n")
     return max(count - 1, 0)   # descontar la línea de cabecera
+
+
+def _estimate_total_rows(filepath: str) -> int:
+    """
+    Estima el total de filas leyendo solo 1 MB de muestra + tamaño del archivo.
+    No hace un scan completo — ideal para barras de progreso en archivos grandes.
+    """
+    file_size = os.path.getsize(filepath)
+    if file_size == 0:
+        return 0
+    sample_size = min(1_048_576, file_size)
+    with open(filepath, "rb") as f:
+        sample = f.read(sample_size)
+    newlines = sample.count(b"\n")
+    if newlines <= 1:
+        return max(file_size // 128, 1)
+    avg_bytes_per_row = sample_size / newlines
+    return max(int(file_size / avg_bytes_per_row) - 1, 0)
 
 
 # ─── Utilidades de nombre de archivo ─────────────────────────────────────────
@@ -198,7 +217,7 @@ def get_unique_column_values(
             usecols=[column],
             dtype=str,
             on_bad_lines="skip",
-            engine="python",
+            engine="c",
         )
         for chunk in chunk_iter:
             vals = chunk[column].dropna().str.strip().unique()
@@ -239,7 +258,7 @@ def collect_rows_by_group(
             chunksize=100_000,
             dtype=str,
             on_bad_lines="skip",
-            engine="python",
+            engine="c",
         )
         for chunk in chunk_iter:
             chunk = chunk.fillna("")
@@ -294,7 +313,7 @@ def collect_rows_by_two_groups(
             chunksize=100_000,
             dtype=str,
             on_bad_lines="skip",
-            engine="python",
+            engine="c",
         )
         for chunk in chunk_iter:
             chunk = chunk.fillna("")
@@ -389,8 +408,8 @@ def search_values_in_csv(
     results: list[dict] = []
     chunk_iter = None
 
-    search_set  = {v.strip().lower() for v in search_values}
-    total_rows  = count_rows_fast(filepath) if progress_callback else 0
+    search_set = {v.strip().lower() for v in search_values}
+    total_rows = _estimate_total_rows(filepath) if progress_callback else 0
 
     try:
         chunk_iter = pd.read_csv(
@@ -400,17 +419,16 @@ def search_values_in_csv(
             chunksize=100_000,
             dtype=str,
             on_bad_lines="skip",
-            engine="python",
+            engine="c",
         )
-        basename    = Path(filepath).name
-        row_offset  = 1   # +1 por la cabecera
+        basename   = Path(filepath).name
+        row_offset = 1   # +1 por la cabecera
 
         for chunk in chunk_iter:
             if cancel_fn and cancel_fn():
                 break
 
             chunk_len = len(chunk)
-            chunk = chunk.fillna("")
 
             if search_column not in chunk.columns:
                 row_offset += chunk_len
@@ -418,11 +436,12 @@ def search_values_in_csv(
                     progress_callback(min(99, int(row_offset / total_rows * 100)))
                 continue
 
-            chunk_lower = chunk[search_column].str.strip().str.lower()
+            # Solo procesar la columna de búsqueda para el mask; evita fillna en todo el chunk
+            chunk_lower = chunk[search_column].fillna("").str.strip().str.lower()
             mask        = chunk_lower.isin(search_set)
-            matched     = chunk[mask]
 
-            if not matched.empty:
+            if mask.any():
+                matched = chunk[mask].fillna("")
                 if columns_to_read:
                     avail   = [c for c in columns_to_read if c in matched.columns]
                     matched = matched[avail]
@@ -467,7 +486,7 @@ def get_unique_values_by_group(
             usecols=[group_column, value_column],
             dtype=str,
             on_bad_lines="skip",
-            engine="python",
+            engine="c",
         )
         for chunk in chunk_iter:
             chunk = chunk.fillna("")
@@ -603,7 +622,7 @@ def process_csv(
             chunksize=chunksize,
             on_bad_lines="skip",
             dtype=str,
-            engine="python",
+            engine="c",
         )
 
         for chunk in chunk_iter:
@@ -867,7 +886,7 @@ def add_column_to_csv(
             chunksize=100_000,
             dtype=str,
             on_bad_lines="skip",
-            engine="python",
+            engine="c",
         )
 
         # Abrir archivo de salida
