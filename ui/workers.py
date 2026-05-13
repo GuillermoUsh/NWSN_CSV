@@ -2,7 +2,6 @@
 ui/workers.py — Workers QThread para operaciones asíncronas de procesamiento CSV.
 """
 
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 from PyQt6.QtCore import QThread, pyqtSignal
@@ -88,30 +87,33 @@ class SearchWorker(QThread):
     def cancel(self): self._cancel = True
 
     def run(self):
-        results = []
-        total   = len(self._files)
+        results     = []
+        total_files = len(self._files)
         try:
-            with ThreadPoolExecutor(max_workers=4) as pool:
-                futures = {
-                    pool.submit(self._search_one, fp, i): fp
-                    for i, fp in enumerate(self._files)
-                }
-                for idx, fut in enumerate(as_completed(futures)):
-                    if self._cancel:
-                        pool.shutdown(wait=False, cancel_futures=True)
-                        self.cancelled.emit()
-                        return
-                    rows, fp, err = fut.result()
-                    if err:
-                        self.warning.emit(err)
-                    results.extend(rows)
-                    pct = int((idx + 1) / total * 100)
-                    self.progress.emit(pct, f"Buscando en {Path(fp).name}…")
+            for idx, fp in enumerate(self._files):
+                if self._cancel:
+                    self.cancelled.emit()
+                    return
+
+                file_base = int(idx / total_files * 100)
+                file_top  = int((idx + 1) / total_files * 100)
+
+                def chunk_cb(file_pct: int, _fp=fp, _base=file_base, _top=file_top):
+                    overall = _base + int(file_pct * (_top - _base) / 100)
+                    self.progress.emit(overall, f"Buscando en {Path(_fp).name}… {file_pct}%")
+
+                rows, fp_done, err = self._search_one(fp, idx, chunk_cb)
+                if err:
+                    self.warning.emit(err)
+                results.extend(rows)
+                self.progress.emit(file_top, f"✓ {Path(fp_done).name}")
+
             self.done.emit(results)
         except Exception as e:
             self.error.emit(str(e))
 
-    def _search_one(self, filepath: str, file_idx: int) -> tuple[list, str, str]:
+    def _search_one(self, filepath: str, file_idx: int,
+                    progress_callback=None) -> tuple[list, str, str]:
         try:
             enc      = detect_encoding(filepath)
             delim    = detect_delimiter(filepath, enc)
@@ -130,7 +132,11 @@ class SearchWorker(QThread):
             if col is None:
                 return [], filepath, ""
 
-            rows = search_values_in_csv(filepath, enc, delim, col, self._values)
+            rows = search_values_in_csv(
+                filepath, enc, delim, col, self._values,
+                cancel_fn=lambda: self._cancel,
+                progress_callback=progress_callback,
+            )
             if not rows:
                 return [], filepath, ""
 

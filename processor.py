@@ -355,13 +355,14 @@ def search_value_in_csv(
 
 
 def search_values_in_csv(
-    filepath:        str,
-    encoding:        str,
-    delimiter:       str,
-    search_column:   str,
-    search_values:   list[str],
-    columns_to_read: Optional[list[str]] = None,
-    cancel_fn:       Optional[Callable[[], bool]] = None,
+    filepath:          str,
+    encoding:          str,
+    delimiter:         str,
+    search_column:     str,
+    search_values:     list[str],
+    columns_to_read:   Optional[list[str]] = None,
+    cancel_fn:         Optional[Callable[[], bool]] = None,
+    progress_callback: Optional[Callable[[int], None]] = None,
 ) -> list[dict]:
     """
     Busca MÚLTIPLES valores (exacta, case-insensitive) en `search_column`.
@@ -369,13 +370,14 @@ def search_values_in_csv(
 
     Parámetros
     ----------
-    filepath        : ruta al CSV
-    encoding        : codificación del archivo
-    delimiter       : delimitador del CSV
-    search_column   : columna donde buscar
-    search_values   : lista de valores a buscar
-    columns_to_read : columnas a incluir en resultados (None = todas)
-    cancel_fn       : función que retorna True para cancelar
+    filepath          : ruta al CSV
+    encoding          : codificación del archivo
+    delimiter         : delimitador del CSV
+    search_column     : columna donde buscar
+    search_values     : lista de valores a buscar
+    columns_to_read   : columnas a incluir en resultados (None = todas)
+    cancel_fn         : función que retorna True para cancelar
+    progress_callback : recibe int 0-99 por cada chunk procesado
 
     Retorna
     -------
@@ -387,7 +389,8 @@ def search_values_in_csv(
     results: list[dict] = []
     chunk_iter = None
 
-    search_set = {v.strip().lower() for v in search_values}
+    search_set  = {v.strip().lower() for v in search_values}
+    total_rows  = count_rows_fast(filepath) if progress_callback else 0
 
     try:
         chunk_iter = pd.read_csv(
@@ -411,6 +414,8 @@ def search_values_in_csv(
 
             if search_column not in chunk.columns:
                 row_offset += chunk_len
+                if progress_callback and total_rows > 0:
+                    progress_callback(min(99, int(row_offset / total_rows * 100)))
                 continue
 
             chunk_lower = chunk[search_column].str.strip().str.lower()
@@ -429,6 +434,8 @@ def search_values_in_csv(
                     results.append(rec)
 
             row_offset += chunk_len
+            if progress_callback and total_rows > 0:
+                progress_callback(min(99, int(row_offset / total_rows * 100)))
 
     finally:
         if chunk_iter is not None:
