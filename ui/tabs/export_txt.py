@@ -220,12 +220,18 @@ class ExportTXTTab(QWidget):
         grp = self.combo_grp.currentText() if self.rb_grp.isChecked() else None
         out = str(Path(self._filepath).parent / "txt_output")
 
+        from processor import _estimate_total_rows
+        total_rows = _estimate_total_rows(self._filepath)
+
         def export_fn(fp, enc, delim, col, fmt, grp, out, cancel_fn, progress_cb):
             import csv as _csv
             Path(out).mkdir(parents=True, exist_ok=True)
 
             def fmt_val(v):
                 return f"'{v}',\n" if fmt == "quoted" else f"{v}\n"
+
+            def _pct(i):
+                return min(99, int(i / total_rows * 100)) if total_rows > 0 else 0
 
             if grp:
                 handles: dict = {}
@@ -244,8 +250,8 @@ class ExportTXTTab(QWidget):
                             if value not in seen[k]:
                                 handles[k].write(fmt_val(value))
                                 seen[k].add(value)
-                            if i % 1000 == 0:
-                                progress_cb(i % 100, f"Procesando fila {i:,}…")
+                            if i % 5_000 == 0:
+                                progress_cb(_pct(i), f"Procesando fila {i:,}…")
                 finally:
                     for h in handles.values():
                         h.close()
@@ -262,8 +268,8 @@ class ExportTXTTab(QWidget):
                         if value not in seen:
                             fout.write(fmt_val(value))
                             seen.add(value)
-                        if i % 1000 == 0:
-                            progress_cb(i % 100, f"Procesando fila {i:,}…")
+                        if i % 5_000 == 0:
+                            progress_cb(_pct(i), f"Procesando fila {i:,}…")
                 progress_cb(100, "✓ Archivo generado")
             return out
 
@@ -275,6 +281,7 @@ class ExportTXTTab(QWidget):
                 self._add_created_file(m[5:])
             else:
                 self.progress.set(p)
+                self.lbl_status.setText(m)
 
         self._worker.progress.connect(_on_progress)
         self._worker.done.connect(lambda d: self._finish(f"✓ Exportado en: {d}", "success", d))

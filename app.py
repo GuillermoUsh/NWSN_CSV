@@ -108,7 +108,7 @@ class MainWindow(QMainWindow):
         self.tab_partname = PartNameTab()
 
         self.tabs.addTab(self.tab_csv,      "  Exportar CSV  ")
-        self.tabs.addTab(self.tab_txt,      "  Exportar TXT  ")
+        self.tabs.addTab(self.tab_txt,      "  Exportar SN a TXT  ")
         self.tabs.addTab(self.tab_json,     "  Exportar JSON  ")
         self.tabs.addTab(self.tab_search,   "  Buscar  ")
         self.tabs.addTab(self.tab_addcol,   "  Agregar Columna  ")
