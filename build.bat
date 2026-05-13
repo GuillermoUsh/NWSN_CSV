@@ -20,6 +20,18 @@ python -m PyInstaller ^
   --hidden-import PyQt6.QtGui ^
   --hidden-import pandas ^
   --hidden-import chardet ^
+  --hidden-import constants ^
+  --hidden-import ui ^
+  --hidden-import ui.theme ^
+  --hidden-import ui.workers ^
+  --hidden-import ui.widgets ^
+  --hidden-import ui.tabs ^
+  --hidden-import ui.tabs.export_csv ^
+  --hidden-import ui.tabs.export_txt ^
+  --hidden-import ui.tabs.export_json ^
+  --hidden-import ui.tabs.search ^
+  --hidden-import ui.tabs.add_column ^
+  --hidden-import ui.tabs.part_name ^
   main.py
 
 echo.

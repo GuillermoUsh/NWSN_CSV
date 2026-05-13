@@ -87,6 +87,7 @@ def sanitize_filename(value: str, max_len: int = 100) -> str:
     safe = str(value).strip()
     for ch in r'\/:*?"<>|':
         safe = safe.replace(ch, "_")
+    safe = safe.replace("..", "_")   # previene path traversal
     return safe[:max_len] if safe else "SIN_VALOR"
 
 
