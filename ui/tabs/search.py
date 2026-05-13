@@ -166,8 +166,11 @@ class SearchTab(QWidget):
         return col
 
     def set_columns(self, columns: list):
-        self._all_detected_cols = columns
-        self._refresh_col_combo()
+        # Solo usar si el panel de búsqueda no tiene archivos propios;
+        # si tiene archivos, sus columnas (con mapeos) tienen prioridad.
+        if not self._files_panel.get_files():
+            self._all_detected_cols = columns
+            self._refresh_col_combo()
 
     def _populate_col_combo(self, columns: list):
         self.combo_col.blockSignals(True)
