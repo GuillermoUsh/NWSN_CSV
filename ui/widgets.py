@@ -303,7 +303,7 @@ class ColumnMappingDialog(QDialog):
     def get_mapping(self) -> dict[str, str]:
         """Retorna {col_real_del_archivo: nombre_canonico} para las selecciones no omitidas."""
         return {
-            canonical: combo.currentText()
+            combo.currentText(): canonical
             for canonical, combo in self._combos.items()
             if combo.currentText() != "(omitir)"
         }
