@@ -597,6 +597,9 @@ def process_csv(
         progress_callback(0.01, "Contando filas del archivo...")
     total_rows_est = count_rows_fast(filepath)
 
+    # Sufijo derivado del nombre del archivo fuente (ej: "20260326" de "db_20260326.csv")
+    source_suffix = _sanitize_filename(Path(filepath).stem).replace(" ", "_")
+
     # Siempre leer split_col aunque el usuario no la haya seleccionado
     cols_for_split = list(dict.fromkeys([split_col] + selected_columns))
     write_cols     = selected_columns   # columnas que van al CSV de salida
@@ -664,9 +667,9 @@ def process_csv(
                 # Determinar el archivo actual para este grupo
                 current_part = file_part_numbers[base_name]
                 if current_part == 1:
-                    out_file = str(output_path / f"{safe_name}.csv")
+                    out_file = str(output_path / f"{safe_name}_{source_suffix}.csv")
                 else:
-                    out_file = str(output_path / f"{safe_name}_part{current_part}.csv")
+                    out_file = str(output_path / f"{safe_name}_{source_suffix}_part{current_part}.csv")
 
                 # Función auxiliar para crear/abrir archivo con header
                 def open_new_file(file_path, is_new_part=False):
@@ -748,7 +751,7 @@ def process_csv(
                         # Crear nuevo archivo part
                         file_part_numbers[base_name] += 1
                         current_part = file_part_numbers[base_name]
-                        out_file = str(output_path / f"{safe_name}_part{current_part}.csv")
+                        out_file = str(output_path / f"{safe_name}_{source_suffix}_part{current_part}.csv")
                         file_row_counts[base_name] = 0
 
                         writer, header_to_write = open_new_file(out_file, is_new_part=True)
