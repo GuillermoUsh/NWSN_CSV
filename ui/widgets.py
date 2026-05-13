@@ -358,13 +358,33 @@ class ColumnPanel(QWidget):
                 item.widget().deleteLater()
         self._checks.clear()
         for col in columns:
-            label   = self._rename_map.get(col, col)
-            display = f"{label}  →  {col}" if label != col else col
-            cb = QCheckBox(display)
-            cb.setChecked(True)
-            cb.stateChanged.connect(lambda _: self.columns_changed.emit())
-            self._checks[col] = cb
-            self._scroll_layout.insertWidget(self._scroll_layout.count() - 1, cb)
+            label     = self._rename_map.get(col, col)
+            is_mapped = label != col
+
+            if is_mapped:
+                # Fila con checkbox "PRESET →" + label coloreado con nombre real
+                row = QWidget()
+                row_h = QHBoxLayout(row)
+                row_h.setContentsMargins(0, 0, 0, 0)
+                row_h.setSpacing(0)
+                cb = QCheckBox(f"{label}  →  ")
+                cb.setChecked(True)
+                cb.stateChanged.connect(lambda _: self.columns_changed.emit())
+                lbl_actual = QLabel(col)
+                lbl_actual.setStyleSheet("color: #f59e0b; font-weight: 600;")
+                lbl_actual.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+                lbl_actual.mousePressEvent = lambda _e, c=cb: c.toggle()
+                row_h.addWidget(cb)
+                row_h.addWidget(lbl_actual)
+                row_h.addStretch()
+                self._checks[col] = cb
+                self._scroll_layout.insertWidget(self._scroll_layout.count() - 1, row)
+            else:
+                cb = QCheckBox(col)
+                cb.setChecked(True)
+                cb.stateChanged.connect(lambda _: self.columns_changed.emit())
+                self._checks[col] = cb
+                self._scroll_layout.insertWidget(self._scroll_layout.count() - 1, cb)
 
     def get_selected(self) -> list:
         return [col for col, cb in self._checks.items() if cb.isChecked()]
