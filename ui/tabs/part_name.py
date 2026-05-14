@@ -34,8 +34,8 @@ class PartNameTab(QWidget):
 
         container = QWidget()
         layout = QVBoxLayout(container)
-        layout.setContentsMargins(12, 12, 12, 12)
-        layout.setSpacing(8)
+        layout.setContentsMargins(10, 8, 10, 8)
+        layout.setSpacing(6)
         tab_scroll.setWidget(container)
 
         row1 = QHBoxLayout()
@@ -44,7 +44,7 @@ class PartNameTab(QWidget):
         self.combo_classcode.setMinimumWidth(200)
         self.btn_analyze = QPushButton("🔍  Analizar")
         self.btn_analyze.setObjectName("accent")
-        self.btn_analyze.setFixedHeight(38)
+        self.btn_analyze.setFixedHeight(32)
         self.btn_analyze.clicked.connect(self._analyze)
         row1.addWidget(self.combo_classcode)
         row1.addWidget(self.btn_analyze)

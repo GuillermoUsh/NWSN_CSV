@@ -31,15 +31,15 @@ class ExportCSVTab(QWidget):
         self._palette: dict = DARK
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(8, 8, 8, 8)
-        layout.setSpacing(6)
+        layout.setContentsMargins(10, 6, 10, 6)
+        layout.setSpacing(4)
 
         # Paginación
         page_bar = QHBoxLayout()
-        self.btn_first = QPushButton("|◀"); self.btn_first.setFixedSize(38, 28)
-        self.btn_prev  = QPushButton("◀");  self.btn_prev.setFixedSize(38, 28)
-        self.btn_next  = QPushButton("▶");  self.btn_next.setFixedSize(38, 28)
-        self.btn_last  = QPushButton("▶|"); self.btn_last.setFixedSize(38, 28)
+        self.btn_first = QPushButton("|◀"); self.btn_first.setFixedSize(34, 26)
+        self.btn_prev  = QPushButton("◀");  self.btn_prev.setFixedSize(34, 26)
+        self.btn_next  = QPushButton("▶");  self.btn_next.setFixedSize(34, 26)
+        self.btn_last  = QPushButton("▶|"); self.btn_last.setFixedSize(34, 26)
         for b in (self.btn_first, self.btn_prev, self.btn_next, self.btn_last):
             b.setFont(QFont("Segoe UI", 10, QFont.Weight.Bold))
             b.setEnabled(False)
@@ -82,13 +82,13 @@ class ExportCSVTab(QWidget):
         actions = QHBoxLayout()
         self.btn_process = QPushButton("▶  PROCESAR")
         self.btn_process.setObjectName("success")
-        self.btn_process.setFixedHeight(38)
+        self.btn_process.setFixedHeight(32)
         self.btn_cancel = QPushButton("✕  Cancelar")
         self.btn_cancel.setObjectName("danger")
-        self.btn_cancel.setFixedHeight(38)
+        self.btn_cancel.setFixedHeight(32)
         self.btn_cancel.setEnabled(False)
         self.btn_open = QPushButton("📂  Abrir carpeta")
-        self.btn_open.setFixedHeight(38)
+        self.btn_open.setFixedHeight(32)
         self.btn_open.setEnabled(False)
         self.btn_process.clicked.connect(self._start)
         self.btn_cancel.clicked.connect(self._cancel)

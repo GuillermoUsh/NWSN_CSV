@@ -37,8 +37,8 @@ class AddColumnTab(QWidget):
         self._palette: dict = {}
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(8, 8, 8, 8)
-        layout.setSpacing(6)
+        layout.setContentsMargins(10, 6, 10, 6)
+        layout.setSpacing(4)
 
         # ── Carga de archivo ──────────────────────────────────────────────────
         file_row = QHBoxLayout()
@@ -115,14 +115,14 @@ class AddColumnTab(QWidget):
         actions = QHBoxLayout()
         self.btn_preview = QPushButton("👁  Vista Previa")
         self.btn_preview.setObjectName("accent")
-        self.btn_preview.setFixedHeight(38)
+        self.btn_preview.setFixedHeight(32)
         self.btn_preview.clicked.connect(self._show_preview)
         self.btn_add = QPushButton("➕  Agregar Columna")
         self.btn_add.setObjectName("success")
-        self.btn_add.setFixedHeight(38)
+        self.btn_add.setFixedHeight(32)
         self.btn_add.clicked.connect(self._start)
         self.btn_open = QPushButton("📂  Abrir carpeta")
-        self.btn_open.setFixedHeight(38)
+        self.btn_open.setFixedHeight(32)
         self.btn_open.setEnabled(False)
         self.btn_open.clicked.connect(self._open_dest)
         actions.addWidget(self.btn_preview)

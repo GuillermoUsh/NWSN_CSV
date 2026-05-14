@@ -30,8 +30,8 @@ class ExportJSONTab(QWidget):
         self._df = None
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(12, 12, 12, 12)
-        layout.setSpacing(8)
+        layout.setContentsMargins(10, 8, 10, 8)
+        layout.setSpacing(6)
 
         row1 = QHBoxLayout()
         row1.addWidget(QLabel("Carpetas por:"))
@@ -58,7 +58,7 @@ class ExportJSONTab(QWidget):
         self.txt_preview = QTextEdit()
         self.txt_preview.setReadOnly(True)
         self.txt_preview.setFont(QFont("Consolas", 9))
-        self.txt_preview.setFixedHeight(220)
+        self.txt_preview.setFixedHeight(150)
         self.txt_preview.setPlaceholderText("Vista previa del formato JSON…")
         layout.addWidget(self.txt_preview)
 
@@ -79,13 +79,13 @@ class ExportJSONTab(QWidget):
         actions = QHBoxLayout()
         self.btn_export = QPushButton("🗂  Exportar JSON")
         self.btn_export.setObjectName("success")
-        self.btn_export.setFixedHeight(38)
+        self.btn_export.setFixedHeight(32)
         self.btn_cancel = QPushButton("✕  Cancelar")
         self.btn_cancel.setObjectName("danger")
-        self.btn_cancel.setFixedHeight(38)
+        self.btn_cancel.setFixedHeight(32)
         self.btn_cancel.setEnabled(False)
         self.btn_open_dest = QPushButton("📂  Abrir carpeta")
-        self.btn_open_dest.setFixedHeight(38)
+        self.btn_open_dest.setFixedHeight(32)
         self.btn_open_dest.setEnabled(False)
         self.btn_export.clicked.connect(self._start)
         self.btn_cancel.clicked.connect(self._cancel)
