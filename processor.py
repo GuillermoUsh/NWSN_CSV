@@ -341,6 +341,48 @@ def collect_rows_by_two_groups(
     return result
 
 
+def validate_uniform_column(
+    filepath:  str,
+    encoding:  str,
+    delimiter: str,
+    column:    str,
+) -> tuple[bool, str, str]:
+    """
+    Verifica que `column` tenga el mismo valor en todas las filas.
+    Detiene al primer valor diferente — no lee el archivo completo si hay mismatch.
+
+    Retorna (es_valido, primer_valor, valor_distinto).
+    Si el archivo no tiene filas, retorna (True, "", "").
+    """
+    first_value: str | None = None
+    chunk_iter = None
+    try:
+        chunk_iter = pd.read_csv(
+            filepath,
+            sep=delimiter,
+            encoding=encoding,
+            chunksize=100_000,
+            usecols=[column],
+            dtype=str,
+            on_bad_lines="skip",
+            engine="c",
+        )
+        for chunk in chunk_iter:
+            vals = chunk[column].fillna("").str.strip()
+            if first_value is None:
+                if vals.empty:
+                    continue
+                first_value = vals.iloc[0]
+            diff_mask = vals != first_value
+            if diff_mask.any():
+                bad_val = str(vals[diff_mask].iloc[0])
+                return False, first_value, bad_val
+    finally:
+        if chunk_iter is not None:
+            chunk_iter.close()
+    return True, first_value or "", ""
+
+
 def search_value_in_csv(
     filepath:        str,
     encoding:        str,
