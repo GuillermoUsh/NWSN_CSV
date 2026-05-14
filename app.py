@@ -126,11 +126,23 @@ class MainWindow(QMainWindow):
         self.col_panel.columns_changed.connect(self._on_columns_changed)
 
     def _on_tab_changed(self, index: int):
-        is_search = (self.tabs.tabText(index).strip() == "Buscar")
-        self._left_stack.setCurrentIndex(1 if is_search else 0)
-        self.btn_open.setVisible(not is_search)
-        self.lbl_file.setVisible(not is_search)
-        self._top_spacer.setVisible(is_search)
+        tab_name    = self.tabs.tabText(index).strip()
+        is_search   = tab_name == "Buscar"
+        is_addcol   = tab_name == "Agregar Columna"
+        hide_loader = is_search or is_addcol
+
+        if is_search:
+            self._left_stack.setCurrentIndex(1)
+            self._left_stack.setVisible(True)
+        elif is_addcol:
+            self._left_stack.setVisible(False)
+        else:
+            self._left_stack.setCurrentIndex(0)
+            self._left_stack.setVisible(True)
+
+        self.btn_open.setVisible(not hide_loader)
+        self.lbl_file.setVisible(not hide_loader)
+        self._top_spacer.setVisible(hide_loader)
 
     # ── Carga de archivo ──────────────────────────────────────────────────────
 
