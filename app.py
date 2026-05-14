@@ -171,8 +171,6 @@ class MainWindow(QMainWindow):
         self.tab_csv.set_preview(df, self._p)
         self.tab_txt.setup(path, enc, delim, columns, self._rename_map, df)
         self.tab_json.setup(path, enc, delim, columns, self.col_panel.get_selected, self._rename_map, df)
-        self.tab_addcol.setup(path, enc, delim, columns, self._p)
-        self.tab_addcol.set_preview(df, self._p)
         self.tab_search.set_columns(columns)
         self.tab_partname.setup(df, columns, self._p, path, enc, delim)
 
