@@ -2,7 +2,7 @@
 app.py — CSV Processor · Ventana principal.
 """
 
-__version__ = "3.0.0"
+__version__ = "3.0.2"
 
 from pathlib import Path
 
