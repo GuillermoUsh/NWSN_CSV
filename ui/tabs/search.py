@@ -267,7 +267,6 @@ class SearchTab(QWidget):
         else:
             self._finish_search(f"✓ {count} resultado(s) encontrado(s).", "success")
         self._show_not_found(results)
-        QApplication.restoreOverrideCursor()
 
     def _show_not_found(self, results: list):
         searched = getattr(self, "_last_searched", [])
@@ -290,7 +289,6 @@ class SearchTab(QWidget):
 
     def _on_error(self, msg):
         self._finish_search(f"✗ Error: {msg}", "error")
-        QApplication.restoreOverrideCursor()
 
     def _finish_search(self, msg, state):
         self.btn_search.setEnabled(True)

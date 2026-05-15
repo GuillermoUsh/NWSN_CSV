@@ -347,12 +347,8 @@ class AddColumnTab(QWidget):
         self._worker.start()
 
     def _on_error(self, msg: str):
-        QApplication.restoreOverrideCursor()
-        self.btn_add.setEnabled(True)
         if "valores diferentes" in msg or "uniforme" in msg.lower():
-            # Error de validación: mostrar como warning prominente
-            self.lbl_status.setText(msg.split("\n")[0])
-            self.lbl_status.setStyleSheet("color: #ef4444;")
+            self._finish(msg.split("\n")[0], "error", "")
             QMessageBox.warning(self, "No se puede agregar la columna", msg)
         else:
             self._finish(f"✗ {msg}", "error", "")
