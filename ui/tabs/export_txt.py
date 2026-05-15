@@ -286,7 +286,7 @@ class ExportTXTTab(QWidget):
         self._worker.progress.connect(_on_progress)
         self._worker.done.connect(lambda d: self._finish(f"✓ Exportado en: {d}", "success", d))
         self._worker.error.connect(lambda e: self._finish(f"✗ {e}", "error", ""))
-        self._worker.cancelled.connect(lambda: self._finish("⚠ Cancelado.", "warning", ""))
+        self._worker.cancelled.connect(lambda: self._finish("⚠ Cancelado — abrí la carpeta para eliminar los archivos parciales.", "warning", out))
         self.btn_export.setEnabled(False)
         self.btn_cancel.setEnabled(True)
         self.progress.reset()
@@ -302,7 +302,7 @@ class ExportTXTTab(QWidget):
         colors = {"success": "#22c55e", "error": "#ef4444", "warning": "#f59e0b"}
         self.lbl_status.setText(msg)
         self.lbl_status.setStyleSheet(f"color: {colors.get(state, 'gray')};")
-        if out_dir:
+        if out_dir and os.path.isdir(out_dir):
             self._last_dir = out_dir
             self.btn_open_dest.setEnabled(True)
 
