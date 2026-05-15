@@ -34,9 +34,10 @@ class FileLoaderWorker(QThread):
 
 
 class CSVExportWorker(QThread):
-    progress = pyqtSignal(int, str)
-    done     = pyqtSignal(str)
-    error    = pyqtSignal(str)
+    progress  = pyqtSignal(int, str)
+    done      = pyqtSignal(str)
+    error     = pyqtSignal(str)
+    cancelled = pyqtSignal()
 
     def __init__(self, filepath, enc, delim, columns, filters, out_dir, out_delim, rename_map):
         super().__init__()
@@ -48,11 +49,15 @@ class CSVExportWorker(QThread):
         self._out_dir    = out_dir
         self._out_delim  = out_delim
         self._rename_map = rename_map
+        self._cancel     = False
+
+    def cancel(self):
+        self._cancel = True
 
     def run(self):
         def cb(pct, msg): self.progress.emit(int(pct * 100), msg)
         try:
-            process_csv(
+            result = process_csv(
                 filepath          = self._filepath,
                 encoding          = self._enc,
                 delimiter         = self._delim,
@@ -62,8 +67,12 @@ class CSVExportWorker(QThread):
                 out_delimiter     = self._out_delim,
                 rename_map        = self._rename_map,
                 progress_callback = cb,
+                cancel_fn         = lambda: self._cancel,
             )
-            self.done.emit(self._out_dir)
+            if result is None:
+                self.cancelled.emit()
+            else:
+                self.done.emit(self._out_dir)
         except Exception as e:
             self.error.emit(str(e))
 

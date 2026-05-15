@@ -187,8 +187,9 @@ class ExportCSVTab(QWidget):
         self._worker.progress.connect(self._on_progress)
         self._worker.done.connect(self._on_done)
         self._worker.error.connect(self._on_error)
+        self._worker.cancelled.connect(lambda: self._finish("⚠ Cancelado.", "warning"))
         self.btn_process.setEnabled(False)
-        self.btn_cancel.setEnabled(False)
+        self.btn_cancel.setEnabled(True)
         self.btn_open.setEnabled(False)
         self.progress.reset()
         self._set_status("Procesando…", "muted")
@@ -196,7 +197,8 @@ class ExportCSVTab(QWidget):
         self._worker.start()
 
     def _cancel(self):
-        pass  # process_csv no soporta cancelación en vuelo
+        if self._worker:
+            self._worker.cancel()
 
     def _on_progress(self, pct, msg):
         self.progress.set(pct)
@@ -212,6 +214,7 @@ class ExportCSVTab(QWidget):
 
     def _finish(self, msg, state):
         self.btn_process.setEnabled(True)
+        self.btn_cancel.setEnabled(False)
         self._set_status(msg, state)
         QApplication.restoreOverrideCursor()
 

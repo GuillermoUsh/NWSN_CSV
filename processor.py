@@ -559,7 +559,8 @@ def process_csv(
     column_order:      Optional[list[str]] = None,
     max_rows_per_file: int = 500_000,
     progress_callback: Optional[Callable[[float, str], None]] = None,
-) -> dict:
+    cancel_fn:         Optional[Callable[[], bool]] = None,
+) -> Optional[dict]:
     """
     Lee el CSV en chunks, aplica filtros/transformaciones y genera un CSV de salida
     por cada valor único de la PRIMERA columna del archivo original.
@@ -670,7 +671,12 @@ def process_csv(
             engine="c",
         )
 
+        _cancelled = False
         for chunk in chunk_iter:
+            if cancel_fn and cancel_fn():
+                _cancelled = True
+                break
+
             chunk = chunk.fillna("")
 
             # Normalizar columnas de fecha antes de aplicar filtros
@@ -822,6 +828,9 @@ def process_csv(
         # Cerrar todos los archivos de salida
         for fh in file_handles.values():
             fh.close()
+
+    if _cancelled:
+        return None
 
     if progress_callback:
         progress_callback(1.0, "Completado")
