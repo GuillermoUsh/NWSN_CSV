@@ -187,7 +187,7 @@ class ExportCSVTab(QWidget):
         self._worker.progress.connect(self._on_progress)
         self._worker.done.connect(self._on_done)
         self._worker.error.connect(self._on_error)
-        self._worker.cancelled.connect(lambda: self._finish("⚠ Cancelado.", "warning"))
+        self._worker.cancelled.connect(lambda: self._on_cancelled(out_dir))
         self.btn_process.setEnabled(False)
         self.btn_cancel.setEnabled(True)
         self.btn_open.setEnabled(False)
@@ -199,6 +199,12 @@ class ExportCSVTab(QWidget):
     def _cancel(self):
         if self._worker:
             self._worker.cancel()
+
+    def _on_cancelled(self, out_dir):
+        self._finish("⚠ Cancelado — abrí la carpeta para eliminar los archivos parciales.", "warning")
+        if os.path.isdir(out_dir):
+            self._last_out_dir = out_dir
+            self.btn_open.setEnabled(True)
 
     def _on_progress(self, pct, msg):
         self.progress.set(pct)
